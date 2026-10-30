@@ -166,25 +166,30 @@ export class TextCompletionService {
             let text = '';
             const swipes = [];
             const state = { reasoning: '' };
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) return;
-                if (value.data === '[DONE]') return;
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) return;
+                    if (value.data === '[DONE]') return;
 
-                tryParseStreamingError(response, value.data, { quiet: true });
+                    tryParseStreamingError(response, value.data, { quiet: true });
 
-                let data = JSON.parse(value.data);
+                    let data = JSON.parse(value.data);
 
-                if (data?.choices?.[0]?.index > 0) {
-                    const swipeIndex = data.choices[0].index - 1;
-                    swipes[swipeIndex] = (swipes[swipeIndex] || '') + data.choices[0].text;
-                } else {
-                    const newText = data?.choices?.[0]?.text || data?.content || '';
-                    text += newText;
-                    state.reasoning += data?.choices?.[0]?.reasoning ?? '';
+                    if (data?.choices?.[0]?.index > 0) {
+                        const swipeIndex = data.choices[0].index - 1;
+                        swipes[swipeIndex] = (swipes[swipeIndex] || '') + data.choices[0].text;
+                    } else {
+                        const newText = data?.choices?.[0]?.text || data?.content || '';
+                        text += newText;
+                        state.reasoning += data?.choices?.[0]?.reasoning ?? '';
+                    }
+
+                    yield { text, swipes, state };
                 }
-
-                yield { text, swipes, state };
+            } finally {
+                await reader.cancel().catch(() => {});
+                reader.releaseLock();
             }
         };
     }
@@ -507,26 +512,31 @@ export class ChatCompletionService {
             let text = '';
             const swipes = [];
             const state = { reasoning: '', images: [], signature: '', toolSignatures: {} };
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) return;
-                const rawData = value.data;
-                if (rawData === '[DONE]') return;
-                tryParseStreamingError(response, rawData, { quiet: true });
-                const parsed = JSON.parse(rawData);
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) return;
+                    const rawData = value.data;
+                    if (rawData === '[DONE]') return;
+                    tryParseStreamingError(response, rawData, { quiet: true });
+                    const parsed = JSON.parse(rawData);
 
-                const reply = getStreamingReply(parsed, state, {
-                    chatCompletionSource: data.chat_completion_source,
-                    overrideShowThoughts: true,
-                });
-                if (Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
-                    const swipeIndex = parsed.choices[0].index - 1;
-                    swipes[swipeIndex] = (swipes[swipeIndex] || '') + reply;
-                } else {
-                    text += reply;
+                    const reply = getStreamingReply(parsed, state, {
+                        chatCompletionSource: data.chat_completion_source,
+                        overrideShowThoughts: true,
+                    });
+                    if (Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
+                        const swipeIndex = parsed.choices[0].index - 1;
+                        swipes[swipeIndex] = (swipes[swipeIndex] || '') + reply;
+                    } else {
+                        text += reply;
+                    }
+
+                    yield { text, swipes: swipes, state };
                 }
-
-                yield { text, swipes: swipes, state };
+            } finally {
+                await reader.cancel().catch(() => {});
+                reader.releaseLock();
             }
         };
     }

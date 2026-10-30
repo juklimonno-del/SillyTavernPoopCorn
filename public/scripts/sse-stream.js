@@ -26,10 +26,13 @@ class EventSourceStream {
             for (const eventChunk of events) {
                 let eventType = '';
                 // Split up by single newlines.
-                const lines = eventChunk.split(/\n|\r|\r\n/g);
+                const lines = eventChunk.split(/\r\n|\n|\r/g);
                 let eventData = '';
                 for (const line of lines) {
-                    const lineMatch = /([^:]+)(?:: ?(.*))?/.exec(line);
+                    // SSE comments/heartbeats must never become data, even if
+                    // their text contains "data:" or "event:".
+                    if (line.startsWith(':')) continue;
+                    const lineMatch = /^([^:]+)(?:: ?(.*))?$/.exec(line);
                     if (lineMatch) {
                         const field = lineMatch[1];
                         const value = lineMatch[2] || '';

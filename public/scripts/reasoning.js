@@ -581,7 +581,9 @@ export class ReasoningHandler {
 
         if (power_user.stream_fade_in) {
             applyStreamFadeIn(this.messageReasoningContentDom, displayReasoning);
-        } else {
+        } else if (this.messageReasoningContentDom.innerHTML !== displayReasoning) {
+            // Once reasoning finishes, answer tokens still update this handler.
+            // Preserve the existing nodes when formatting produced the same HTML.
             this.messageReasoningContentDom.innerHTML = displayReasoning;
         }
 

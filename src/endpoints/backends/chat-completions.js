@@ -2628,10 +2628,18 @@ router.post('/generate', async function (request, response) {
             `${apiUrl}/chat/completions`;
 
         const controller = new AbortController();
-        request.socket.removeAllListeners('close');
-        request.socket.on('close', function () {
-            controller.abort();
-        });
+        // A keep-alive socket can outlive many generations. Cancel only this
+        // response, without replacing unrelated socket listeners.
+        const cleanup = () => {
+            response.off('close', onClose);
+            response.off('finish', cleanup);
+        };
+        const onClose = () => {
+            cleanup();
+            if (!response.writableEnded) controller.abort();
+        };
+        response.once('close', onClose);
+        response.once('finish', cleanup);
 
         if (!isTextCompletion && Array.isArray(request.body.tools) && request.body.tools.length > 0) {
             bodyParams['tools'] = request.body.tools;
@@ -2702,12 +2710,17 @@ router.post('/generate', async function (request, response) {
             const responseText = await fetchResponse.text();
             const errorData = tryParse(responseText);
 
-            const message = fetchResponse.statusText || 'Unknown error occurred';
+            const providerError = errorData?.error;
+            const message = (typeof providerError === 'string' ? providerError : providerError?.message)
+                || errorData?.message || fetchResponse.statusText || 'Unknown error occurred';
             const quota_error = fetchResponse.status === 429 && errorData?.error?.type === 'insufficient_quota';
             console.error('Chat completion request error: ', message, responseText);
 
             if (!response.headersSent) {
-                response.send({ error: { message }, quota_error: quota_error });
+                // A provider 401 must not reset this server's browser Basic auth.
+                const status = fetchResponse.status === 401 ? 400 : fetchResponse.status;
+                const error = providerError && typeof providerError === 'object' ? providerError : {};
+                response.status(status).send({ error: { ...error, message }, quota_error: quota_error });
             } else if (!response.writableEnded) {
                 response.write(responseText);
             } else {
@@ -2715,6 +2728,7 @@ router.post('/generate', async function (request, response) {
             }
         }
     } catch (error) {
+        if (response.destroyed) return;
         console.error('Generation failed', error);
         const message = error.code === 'ECONNREFUSED'
             ? `Connection refused: ${error.message}`

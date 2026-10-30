@@ -13,6 +13,7 @@ import {
 
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods } from './scripts/RossAscends-mods.js';
 import { userStatsHandler, statMesProcess, initStats } from './scripts/stats.js';
+import { getMessageDepth } from './scripts/message-depth.js';
 import {
     generateKoboldWithStreaming,
     kai_settings,
@@ -1848,9 +1849,7 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
 
         const regexPlacement = getRegexPlacement();
-        const usableMessages = chat.map((x, index) => ({ message: x, index: index })).filter(x => !x.message.is_system);
-        const indexOf = usableMessages.findIndex(x => x.index === Number(messageId));
-        const depth = messageId >= 0 && indexOf !== -1 ? (usableMessages.length - indexOf - 1) : undefined;
+        const depth = getMessageDepth(chat, messageId);
 
         mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes,
             { ch_name, isSystem, isUser, messageId, isReasoning },
@@ -5299,7 +5298,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 jailbreakPromptOverride: jailbreak,
                 messages: oaiMessages,
                 messageExamples: oaiMessageExamples,
-            }, dryRun);
+            }, dryRun).catch(onError);
             generate_data = { prompt: prompt };
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data

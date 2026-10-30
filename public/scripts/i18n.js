@@ -8,6 +8,8 @@ var langs;
 // Don't change to let/const! It will break module loading.
 // eslint-disable-next-line prefer-const
 var localeData;
+// Like localeData, this must be var because template helpers can run during imports.
+var localeHasTranslations = false;
 
 /** @type {Set<string>|null} Array of translations keys if they should be tracked - if not tracked then null */
 let trackMissingDynamicTranslate = null;
@@ -34,6 +36,7 @@ export function addLocaleData(localeId, data) {
         // Overrides for default locale data are not allowed
         if (!Object.hasOwn(localeData, key)) {
             localeData[key] = value;
+            localeHasTranslations = true;
         }
     }
 }
@@ -43,6 +46,9 @@ export function addLocaleData(localeId, data) {
  * @type {MutationObserver}
  */
 const observer = new MutationObserver(mutations => {
+    // English normally has no dictionary. Avoid walking every added message,
+    // streamed markdown fragment and settings template when nothing can translate.
+    if (!localeHasTranslations) return;
     mutations.forEach(mutation => {
         mutation.addedNodes.forEach(node => {
             if (node.nodeType === Node.ELEMENT_NODE && node instanceof Element) {
@@ -244,7 +250,7 @@ async function getMissingTranslations() {
  * @returns {Document|string} Translated root, in the same format as the input (Document or HTML string)
  */
 export function applyLocale(root = document) {
-    if (!localeData || Object.keys(localeData).length === 0) {
+    if (!localeHasTranslations) {
         return root;
     }
 
@@ -278,6 +284,7 @@ function addLanguagesToDropdown() {
 export async function initLocales() {
     langs = await fetch('/locales/lang.json').then(response => response.json());
     localeData = await getLocaleData(localeFile);
+    localeHasTranslations = Object.keys(localeData).length > 0;
     document.documentElement.lang = localeFile;
     applyLocale();
     addLanguagesToDropdown();

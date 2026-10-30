@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import http2 from 'node:http2';
 import process from 'node:process';
-import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { createRequire } from 'node:module';
 import { Buffer } from 'node:buffer';
 import { promises as dnsPromise } from 'node:dns';
@@ -761,18 +761,19 @@ export async function forwardFetchResponse(from, to) {
     }
 
     if (from.body && to.socket) {
-        from.body.pipe(to);
-
-        to.socket.on('close', function () {
-            if (from.body instanceof Readable) from.body.destroy(); // Close the remote stream
-
-            to.end(); // End the Express response
-        });
-
-        from.body.on('end', function () {
+        // Tie cleanup to this response, not its reusable keep-alive socket.
+        // pipeline also closes both ends on upstream errors or cancellation.
+        try {
+            await pipeline(from.body, to);
             console.info('Streaming request finished');
-            to.end();
-        });
+        } catch (error) {
+            // Existing callers may try to send JSON in their catch blocks.
+            // Once the stream destroyed the response, another send is invalid.
+            if (!to.destroyed) throw error;
+            if (error.code !== 'ERR_STREAM_PREMATURE_CLOSE' && error.name !== 'AbortError') {
+                console.warn('Streaming response failed:', error);
+            }
+        }
     } else {
         to.end();
     }

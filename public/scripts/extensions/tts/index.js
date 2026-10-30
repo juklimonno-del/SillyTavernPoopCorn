@@ -2,25 +2,7 @@ import { cancelTtsPlay, eventSource, event_types, getCurrentChatId, isStreamingE
 import { ModuleWorkerWrapper, extension_settings, getContext, renderExtensionTemplateAsync } from '../../extensions.js';
 import { delay, escapeRegex, getBase64Async, getStringHash, onlyUnique, regexFromString } from '../../utils.js';
 import { accountStorage } from '../../util/AccountStorage.js';
-import { EdgeTtsProvider } from './edge.js';
-import { ElevenLabsTtsProvider } from './elevenlabs.js';
-import { SileroTtsProvider } from './silerotts.js';
-import { GptSovitsV2Provider } from './gpt-sovits-v2.js';
-import { GptSoVITSAdapterProvider } from './gpt-sovits-adapter.js';
-import { CoquiTtsProvider } from './coqui.js';
-import { SystemTtsProvider } from './system.js';
-import { NovelTtsProvider } from './novel.js';
 import { power_user } from '../../power-user.js';
-import { OpenAITtsProvider } from './openai.js';
-import { OpenAICompatibleTtsProvider } from './openai-compatible.js';
-import { XTTSTtsProvider } from './xtts.js';
-import { VITSTtsProvider } from './vits.js';
-import { GSVITtsProvider } from './gsvi.js';
-import { SBVits2TtsProvider } from './sbvits2.js';
-import { AllTalkTtsProvider } from './alltalk.js';
-import { CosyVoiceProvider } from './cosyvoice.js';
-import { SpeechT5TtsProvider } from './speecht5.js';
-import { AzureTtsProvider } from './azure.js';
 import { SlashCommandParser } from '../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../slash-commands/SlashCommandArgument.js';
@@ -28,16 +10,7 @@ import { debounce_timeout } from '../../constants.js';
 import { SlashCommandEnumValue, enumTypes } from '../../slash-commands/SlashCommandEnumValue.js';
 import { enumIcons } from '../../slash-commands/SlashCommandCommonEnumsProvider.js';
 import { POPUP_TYPE, callGenericPopup } from '../../popup.js';
-import { GoogleTranslateTtsProvider } from './google-translate.js';
-import { GoogleNativeTtsProvider } from './google-native.js';
-import { ChatterboxTtsProvider } from './chatterbox.js';
-import { KokoroTtsProvider } from './kokoro.js';
-import { TtsWebuiProvider } from './tts-webui.js';
-import { PollinationsTtsProvider } from './pollinations.js';
-import { MiniMaxTtsProvider } from './minimax.js';
-import { ElectronHubTtsProvider } from './electronhub.js';
-import { ChutesTtsProvider } from './chutes.js';
-import { VolcengineTtsProvider } from './volcengine.js';
+import { TtsProviderRegistry } from './provider-registry.js';
 import { applyLocale, t } from '/scripts/i18n.js';
 
 const UPDATE_INTERVAL = 1000;
@@ -51,6 +24,7 @@ let lastMessageHash = null;
 let periodicMessageGenerationTimer = null;
 let lastPositionOfParagraphEnd = -1;
 let currentInitVoiceMapPromise = null;
+let currentInitVoiceMapVersion = null;
 
 const DEFAULT_VOICE_MARKER = '[Default Voice]';
 const DISABLED_VOICE_MARKER = 'disabled';
@@ -108,10 +82,10 @@ export function registerTtsProvider(name, provider) {
     if (!provider || typeof provider !== 'function') {
         throw new Error(`TTS provider ${name} is not a valid provider class.`);
     }
-    if (ttsProviders[name]) {
+    if (ttsProviders.has(name)) {
         throw new Error(`TTS provider ${name} is already registered.`);
     }
-    ttsProviders[name] = provider;
+    ttsProviders.register(name, provider);
     console.info(`Registered TTS provider: ${name}`);
     $('#tts_provider').append($('<option />').val(name).text(name));
 
@@ -121,38 +95,40 @@ export function registerTtsProvider(name, provider) {
     }
 }
 
-const ttsProviders = {
-    AllTalk: AllTalkTtsProvider,
-    Azure: AzureTtsProvider,
-    Chatterbox: ChatterboxTtsProvider,
-    Chutes: ChutesTtsProvider,
-    Coqui: CoquiTtsProvider,
-    'CosyVoice (Unofficial)': CosyVoiceProvider,
-    Edge: EdgeTtsProvider,
-    ElevenLabs: ElevenLabsTtsProvider,
-    'Electron Hub': ElectronHubTtsProvider,
-    'Google Translate': GoogleTranslateTtsProvider,
-    'Google Gemini TTS': GoogleNativeTtsProvider,
-    GSVI: GSVITtsProvider,
-    'GPT-SoVITS-Adapter': GptSoVITSAdapterProvider,
-    'GPT-SoVITS-V2 (Unofficial)': GptSovitsV2Provider,
-    Kokoro: KokoroTtsProvider,
-    MiniMax: MiniMaxTtsProvider,
-    Novel: NovelTtsProvider,
-    OpenAI: OpenAITtsProvider,
-    'OpenAI Compatible': OpenAICompatibleTtsProvider,
-    Pollinations: PollinationsTtsProvider,
-    SBVits2: SBVits2TtsProvider,
-    Silero: SileroTtsProvider,
-    SpeechT5: SpeechT5TtsProvider,
-    System: SystemTtsProvider,
-    'TTS WebUI': TtsWebuiProvider,
-    VITS: VITSTtsProvider,
-    XTTSv2: XTTSTtsProvider,
-    Volcengine: VolcengineTtsProvider,
-};
+const ttsProviders = new TtsProviderRegistry({
+    AllTalk: () => import('./alltalk.js').then(module => module.AllTalkTtsProvider),
+    Azure: () => import('./azure.js').then(module => module.AzureTtsProvider),
+    Chatterbox: () => import('./chatterbox.js').then(module => module.ChatterboxTtsProvider),
+    Chutes: () => import('./chutes.js').then(module => module.ChutesTtsProvider),
+    Coqui: () => import('./coqui.js').then(module => module.CoquiTtsProvider),
+    'CosyVoice (Unofficial)': () => import('./cosyvoice.js').then(module => module.CosyVoiceProvider),
+    Edge: () => import('./edge.js').then(module => module.EdgeTtsProvider),
+    ElevenLabs: () => import('./elevenlabs.js').then(module => module.ElevenLabsTtsProvider),
+    'Electron Hub': () => import('./electronhub.js').then(module => module.ElectronHubTtsProvider),
+    'Google Translate': () => import('./google-translate.js').then(module => module.GoogleTranslateTtsProvider),
+    'Google Gemini TTS': () => import('./google-native.js').then(module => module.GoogleNativeTtsProvider),
+    GSVI: () => import('./gsvi.js').then(module => module.GSVITtsProvider),
+    'GPT-SoVITS-Adapter': () => import('./gpt-sovits-adapter.js').then(module => module.GptSoVITSAdapterProvider),
+    'GPT-SoVITS-V2 (Unofficial)': () => import('./gpt-sovits-v2.js').then(module => module.GptSovitsV2Provider),
+    Kokoro: () => import('./kokoro.js').then(module => module.KokoroTtsProvider),
+    MiniMax: () => import('./minimax.js').then(module => module.MiniMaxTtsProvider),
+    Novel: () => import('./novel.js').then(module => module.NovelTtsProvider),
+    OpenAI: () => import('./openai.js').then(module => module.OpenAITtsProvider),
+    'OpenAI Compatible': () => import('./openai-compatible.js').then(module => module.OpenAICompatibleTtsProvider),
+    Pollinations: () => import('./pollinations.js').then(module => module.PollinationsTtsProvider),
+    SBVits2: () => import('./sbvits2.js').then(module => module.SBVits2TtsProvider),
+    Silero: () => import('./silerotts.js').then(module => module.SileroTtsProvider),
+    SpeechT5: () => import('./speecht5.js').then(module => module.SpeechT5TtsProvider),
+    System: () => import('./system.js').then(module => module.SystemTtsProvider),
+    'TTS WebUI': () => import('./tts-webui.js').then(module => module.TtsWebuiProvider),
+    VITS: () => import('./vits.js').then(module => module.VITSTtsProvider),
+    XTTSv2: () => import('./xtts.js').then(module => module.XTTSTtsProvider),
+    Volcengine: () => import('./volcengine.js').then(module => module.VolcengineTtsProvider),
+});
 let ttsProvider;
 let ttsProviderName;
+let providerLoadVersion = 0;
+let providerLoading = false;
 
 
 async function onNarrateOneMessage() {
@@ -209,7 +185,7 @@ async function onNarrateText(args, text) {
 }
 
 async function moduleWorker() {
-    if (!extension_settings.tts.enabled) {
+    if (!extension_settings.tts.enabled || providerLoading || !ttsProvider) {
         return;
     }
 
@@ -373,6 +349,7 @@ async function playAudioData(audioJob) {
 }
 
 globalThis.tts_preview = function (id) {
+    if (providerLoading || !ttsProvider) return;
     const audio = document.getElementById(id);
 
     if (audio instanceof HTMLAudioElement && !$(audio).data('disabled')) {
@@ -383,10 +360,15 @@ globalThis.tts_preview = function (id) {
 };
 
 async function onTtsVoicesClick() {
+    if (providerLoading || !ttsProvider) return;
+    const provider = ttsProvider;
+    const version = providerLoadVersion;
+    const isCurrent = () => provider === ttsProvider && version === providerLoadVersion && !providerLoading;
     let popupText = '';
 
     try {
-        const voiceIds = await ttsProvider.fetchTtsVoiceObjects();
+        const voiceIds = await provider.fetchTtsVoiceObjects();
+        if (!isCurrent()) return;
 
         for (const voice of voiceIds) {
             popupText += `
@@ -400,6 +382,7 @@ async function onTtsVoicesClick() {
             }
         }
     } catch {
+        if (!isCurrent()) return;
         popupText = 'Could not load voices list. Check your API key.';
     }
 
@@ -463,20 +446,23 @@ function completeCurrentAudioJob() {
  * Accepts an HTTP response containing audio/mpeg data, and puts the data as a Blob() on the queue for playback
  * @param {Response} response
  * @param {string} char
- * @returns {Promise<{audioBlob: Blob|string, mimeType: string}>}
+ * @param {() => boolean} isCurrent Whether the generating job is still active
+ * @returns {Promise<{audioBlob: Blob|string, mimeType: string}|null>}
  */
-async function addAudioJob(response, char) {
+async function addAudioJob(response, char, isCurrent = () => true) {
     let audioBlob, mimeType;
     if (typeof response === 'string') {
         audioBlob = response;
         mimeType = '';
     } else {
         audioBlob = await response.blob();
+        if (!isCurrent()) return null;
         if (!audioBlob.type.startsWith('audio/')) {
             throw `TTS received HTTP response with invalid data format. Expecting audio/*, got ${audioBlob.type}`;
         }
         mimeType = audioBlob.type;
     }
+    if (!isCurrent()) return null;
     audioJobQueue.push({ audioBlob, char });
     console.debug('Pushed audio job to queue.');
     return { audioBlob, mimeType };
@@ -513,34 +499,46 @@ function completeTtsJob() {
 }
 
 async function tts(text, voiceId, char, voiceMapKey = null) {
-    const messageId = currentTtsJob?.id ?? null;
+    const job = currentTtsJob;
+    const provider = ttsProvider;
+    const version = providerLoadVersion;
+    const isCurrent = () => !!provider && provider === ttsProvider && version === providerLoadVersion && job === currentTtsJob && !providerLoading;
+    if (!isCurrent()) return;
+    const messageId = job?.id ?? null;
 
     await eventSource.emit(event_types.TTS_JOB_STARTED, { messageId, characterName: char, text, voiceId });
+    if (!isCurrent()) return;
 
     async function processResponse(response) {
+        if (!isCurrent()) return;
         // RVC injection
         if (typeof globalThis.rvcVoiceConversion === 'function' && extension_settings.rvc.enabled)
             response = await globalThis.rvcVoiceConversion(response, char, text);
+        if (!isCurrent()) return;
 
-        const audioResult = await addAudioJob(response, char);
+        const audioResult = await addAudioJob(response, char, isCurrent);
+        if (!audioResult || !isCurrent()) return;
         const eventData = { messageId, characterName: char, text, audio: audioResult.audioBlob, mimeType: audioResult.mimeType };
         await eventSource.emit(event_types.TTS_AUDIO_READY, eventData);
     }
 
     // voiceMapKey can also include segment qualifiers, e.g. '{char} ("Quotes")'
-    let response = await ttsProvider.generateTts(text, voiceId, voiceMapKey);
+    let response = await provider.generateTts(text, voiceId, voiceMapKey);
+    if (!isCurrent()) return;
 
     // If async generator, process every chunk as it comes in
     if (typeof response[Symbol.asyncIterator] === 'function') {
         for await (const chunk of response) {
+            if (!isCurrent()) return;
             await processResponse(chunk);
         }
     } else {
         await processResponse(response);
     }
 
+    if (!isCurrent()) return;
     await eventSource.emit(event_types.TTS_JOB_COMPLETE, { messageId, characterName: char });
-    completeTtsJob();
+    if (isCurrent()) completeTtsJob();
 }
 
 function parseMessageSegments(text) {
@@ -608,12 +606,16 @@ function parseMessageSegments(text) {
 
 async function processTtsQueue() {
     // Called each moduleWorker iteration to pull chat messages from queue
-    if (currentTtsJob || ttsJobQueue.length <= 0 || audioPaused) {
+    if (currentTtsJob || ttsJobQueue.length <= 0 || audioPaused || providerLoading || !ttsProvider) {
         return;
     }
 
     console.debug('New message found, running TTS');
     currentTtsJob = ttsJobQueue.shift();
+    const job = currentTtsJob;
+    const provider = ttsProvider;
+    const version = providerLoadVersion;
+    const isCurrent = () => job === currentTtsJob && provider === ttsProvider && version === providerLoadVersion && !providerLoading;
 
     // Handle segmented jobs that already have processed text
     if (currentTtsJob.segmentType && currentTtsJob.segmentText) {
@@ -659,7 +661,8 @@ async function processTtsQueue() {
                 throw `${char} not in voicemap. Configure character in extension settings voice map`;
             }
 
-            const voice = await ttsProvider.getVoice(voiceMapEntry);
+            const voice = await provider.getVoice(voiceMapEntry);
+            if (!isCurrent()) return;
             const voiceId = voice.voice_id;
             if (voiceId == null) {
                 toastr.error(`Specified voice for ${char} was not found. Check the TTS extension settings.`);
@@ -669,6 +672,7 @@ async function processTtsQueue() {
             // Pass the full voiceMapKey (e.g., "User ("Quotes")") as well with character name
             await tts(segmentText, voiceId, char, voiceMapKey);
         } catch (error) {
+            if (!isCurrent()) return;
             toastr.error(error.toString());
             console.error(error);
             currentTtsJob = null;
@@ -715,8 +719,17 @@ async function processTtsQueue() {
     // Remove embedded images
     text = text.replace(/!\[.*?]\([^)]*\)/g, '');
 
-    if (typeof ttsProvider?.processText === 'function') {
-        text = await ttsProvider.processText(text);
+    if (typeof provider.processText === 'function') {
+        try {
+            text = await provider.processText(text);
+        } catch (error) {
+            if (!isCurrent()) return;
+            toastr.error(error.toString());
+            console.error(error);
+            currentTtsJob = null;
+            return;
+        }
+        if (!isCurrent()) return;
     }
 
     // Collapse newlines and spaces into single space
@@ -931,17 +944,24 @@ function setTtsStatus(status, success) {
 }
 
 function onRefreshClick() {
-    Promise.all([
-        ttsProvider.onRefreshClick(),
+    if (providerLoading || !ttsProvider) return;
+    const provider = ttsProvider;
+    const providerName = ttsProviderName;
+    const version = providerLoadVersion;
+    const isCurrent = () => provider === ttsProvider && version === providerLoadVersion && !providerLoading;
+    return Promise.all([
+        provider.onRefreshClick(),
         // updateVoiceMap()
     ]).then(() => {
-        extension_settings.tts[ttsProviderName] = ttsProvider.settings;
+        if (!isCurrent()) return;
+        extension_settings.tts[providerName] = provider.settings;
         saveSettingsDebounced();
         setTtsStatus('Successfully applied settings', true);
-        console.info(`Saved settings ${ttsProviderName} ${JSON.stringify(ttsProvider.settings)}`);
+        console.info(`Saved settings ${providerName} ${JSON.stringify(provider.settings)}`);
         initVoiceMap();
         updateVoiceMap();
     }).catch(error => {
+        if (!isCurrent()) return;
         toastr.error(error.toString());
         console.error(error);
         setTtsStatus(error, false);
@@ -1054,26 +1074,45 @@ function updateRegexPatternWarning() {
 //##############//
 
 async function loadTtsProvider(provider) {
+    const version = ++providerLoadVersion;
+    providerLoading = true;
+    resetTtsPlayback();
     //Clear the current config and add new config
     $('#tts_provider_settings').html('');
+    ttsProvider = undefined;
+    ttsProviderName = undefined;
 
     if (!provider) {
+        providerLoading = false;
         return;
     }
 
     // Init provider references
     extension_settings.tts.currentProvider = provider;
-    ttsProviderName = provider;
-    ttsProvider = new ttsProviders[provider];
+    try {
+        const Provider = await ttsProviders.load(provider);
+        // A slow import from an earlier selection must not replace the latest one.
+        if (version !== providerLoadVersion) return;
+        ttsProviderName = provider;
+        ttsProvider = new Provider();
 
-    // Init provider settings
-    $('#tts_provider_settings').append(ttsProvider.settingsHtml);
-    if (!(ttsProviderName in extension_settings.tts)) {
-        console.warn(`Provider ${ttsProviderName} not in Extension Settings, initiatilizing provider in settings`);
-        extension_settings.tts[ttsProviderName] = {};
+        // Init provider settings
+        $('#tts_provider_settings').append(ttsProvider.settingsHtml);
+        if (!(provider in extension_settings.tts)) {
+            extension_settings.tts[provider] = {};
+        }
+        await ttsProvider.loadSettings(extension_settings.tts[provider]);
+        if (version !== providerLoadVersion) return;
+        providerLoading = false;
+        await initVoiceMap();
+    } catch (error) {
+        if (version !== providerLoadVersion) return;
+        ttsProvider = undefined;
+        setTtsStatus(`Could not load TTS provider ${provider}: ${error}`, false);
+        console.error('Could not load TTS provider', provider, error);
+    } finally {
+        if (version === providerLoadVersion) providerLoading = false;
     }
-    await ttsProvider.loadSettings(extension_settings.tts[ttsProviderName]);
-    await initVoiceMap();
 }
 
 function onTtsProviderChange() {
@@ -1088,6 +1127,9 @@ function onTtsProviderChange() {
 
 // Ensure that TTS provider settings are saved to extension settings.
 export function saveTtsProviderSettings() {
+    // A module may still be importing, but provider loadSettings hooks must be
+    // allowed to save once the instance exists.
+    if (!ttsProvider) return;
     extension_settings.tts[ttsProviderName] = ttsProvider.settings;
     updateVoiceMap();
     saveSettingsDebounced();
@@ -1442,53 +1484,64 @@ class VoiceMapEntry {
 
 /**
  * Init voiceMapEntries for character select list.
- * If an initialization is already in progress, it returns the existing Promise instead of starting a new one.
+ * Reuses an existing initialization only when it belongs to the current provider.
  * @param {boolean} unrestricted - If true, will include all characters in voiceMapEntries, even if they are not in the current chat.
  * @returns {Promise} A promise that resolves when the initialization is complete.
  */
 export async function initVoiceMap(unrestricted = false) {
-    // Preventing parallel execution
-    if (currentInitVoiceMapPromise) {
+    const version = providerLoadVersion;
+    if (currentInitVoiceMapPromise && currentInitVoiceMapVersion === version) {
         return currentInitVoiceMapPromise;
     }
 
-    currentInitVoiceMapPromise = (async () => {
+    const promise = (async () => {
         const initialChatId = getCurrentChatId();
         try {
-            await initVoiceMapInternal(unrestricted);
+            await initVoiceMapInternal(unrestricted, version);
         } finally {
-            currentInitVoiceMapPromise = null;
+            if (currentInitVoiceMapPromise === promise) {
+                currentInitVoiceMapPromise = null;
+                currentInitVoiceMapVersion = null;
+            }
         }
         const currentChatId = getCurrentChatId();
 
-        if (initialChatId !== currentChatId) {
+        if (version === providerLoadVersion && initialChatId !== currentChatId) {
             // Chat changed during initialization, reinitialize
             await initVoiceMap(unrestricted);
         }
     })();
 
-    return currentInitVoiceMapPromise;
+    currentInitVoiceMapPromise = promise;
+    currentInitVoiceMapVersion = version;
+    return promise;
 }
 
 /**
  * Init voiceMapEntries for character select list.
  * @param {boolean} unrestricted - If true, will include all characters in voiceMapEntries, even if they are not in the current chat.
+ * @param {number} version - The selected provider generation at initialization.
  */
-async function initVoiceMapInternal(unrestricted) {
+async function initVoiceMapInternal(unrestricted, version) {
+    const provider = ttsProvider;
+    const providerName = ttsProviderName;
+    const isCurrent = () => provider === ttsProvider && version === providerLoadVersion && !providerLoading;
     // Gate initialization if not enabled or TTS Provider not ready. Prevents error popups.
     const enabled = $('#tts_enabled').is(':checked');
-    if (!enabled) {
+    if (!enabled || providerLoading || !provider) {
         return;
     }
 
     // Keep errors inside extension UI rather than toastr. Toastr errors for TTS are annoying.
     try {
-        await ttsProvider.checkReady();
+        await provider.checkReady();
     } catch (error) {
+        if (!isCurrent()) return;
         const message = `TTS Provider not ready. ${error}`;
         setTtsStatus(message, false);
         return;
     }
+    if (!isCurrent()) return;
 
     setTtsStatus('TTS Provider Loaded', true);
 
@@ -1501,23 +1554,26 @@ async function initVoiceMapInternal(unrestricted) {
 
     // Get saved voicemap from provider settings, handling new and old representations
     let voiceMapFromSettings = {};
-    if ('voiceMap' in extension_settings.tts[ttsProviderName]) {
+    const providerSettings = extension_settings.tts[providerName] || {};
+    if ('voiceMap' in providerSettings) {
         // Handle previous representation
-        if (typeof extension_settings.tts[ttsProviderName].voiceMap === 'string') {
-            voiceMapFromSettings = parseVoiceMap(extension_settings.tts[ttsProviderName].voiceMap);
+        if (typeof providerSettings.voiceMap === 'string') {
+            voiceMapFromSettings = parseVoiceMap(providerSettings.voiceMap);
             // Handle new representation
-        } else if (typeof extension_settings.tts[ttsProviderName].voiceMap === 'object') {
-            voiceMapFromSettings = extension_settings.tts[ttsProviderName].voiceMap;
+        } else if (typeof providerSettings.voiceMap === 'object') {
+            voiceMapFromSettings = providerSettings.voiceMap;
         }
     }
 
     // Get voiceIds from provider
     let voiceIdsFromProvider;
     try {
-        voiceIdsFromProvider = await ttsProvider.fetchTtsVoiceObjects();
+        voiceIdsFromProvider = await provider.fetchTtsVoiceObjects();
     } catch {
+        if (!isCurrent()) return;
         toastr.error('TTS Provider failed to return voice ids.');
     }
+    if (!isCurrent()) return;
 
     // Build UI using VoiceMapEntry objects
     for (const character of characters) {
@@ -1569,7 +1625,7 @@ export async function init() {
         });
 
         $('#tts_voices').on('click', onTtsVoicesClick);
-        for (const provider in ttsProviders) {
+        for (const provider of ttsProviders.names()) {
             $('#tts_provider').append($('<option />').val(provider).text(provider));
         }
         $('#tts_provider').on('change', onTtsProviderChange);

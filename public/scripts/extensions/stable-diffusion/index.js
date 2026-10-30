@@ -5021,10 +5021,7 @@ function getVisibilityByInitiator(initiator) {
     }
 }
 
-async function addSDGenButtons() {
-    const buttonHtml = await renderExtensionTemplateAsync('stable-diffusion', 'button');
-    const dropdownHtml = await renderExtensionTemplateAsync('stable-diffusion', 'dropdown');
-
+function addSDGenButtons(buttonHtml, dropdownHtml) {
     $('#sd_wand_container').append(buttonHtml);
     $(document.body).append(dropdownHtml);
 
@@ -5485,7 +5482,14 @@ function registerFunctionTool() {
 }
 
 export async function init() {
-    await addSDGenButtons();
+    // These templates are independent. Fetch them together, then retain the
+    // existing order of DOM insertion, command registration and settings setup.
+    const [buttonHtml, dropdownHtml, template] = await Promise.all([
+        renderExtensionTemplateAsync('stable-diffusion', 'button'),
+        renderExtensionTemplateAsync('stable-diffusion', 'dropdown'),
+        renderExtensionTemplateAsync('stable-diffusion', 'settings', defaultSettings),
+    ]);
+    addSDGenButtons(buttonHtml, dropdownHtml);
 
     const getSelectEnumProvider = (id, text) => () => Array.from(document.querySelectorAll(`#${id} > [value]`)).map(x => new SlashCommandEnumValue(x.getAttribute('value'), text ? x.textContent : null));
 
@@ -5800,7 +5804,6 @@ export async function init() {
     }));
 
 
-    const template = await renderExtensionTemplateAsync('stable-diffusion', 'settings', defaultSettings);
     $('#sd_container').append(template);
     $('#sd_source').on('change', onSourceChange);
     $('#sd_scale').on('input', onScaleInput);

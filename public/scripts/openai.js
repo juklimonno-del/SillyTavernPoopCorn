@@ -82,6 +82,7 @@ import { ToolManager } from './tool-calling.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { COMETAPI_IGNORE_PATTERNS, IGNORE_SYMBOL, MEDIA_DISPLAY, MEDIA_TYPE } from './constants.js';
 import { syncNanoGptProvidersForModel, syncOpenRouterProvidersForModel, updateNanoGptProvidersWarning, updateOpenRouterProvidersWarning } from './textgen-models.js';
+import { parseChatCompletionError } from './chat-completion-error.js';
 
 export {
     openai_messages_count,
@@ -1601,6 +1602,9 @@ export async function prepareOpenAIMessages({
             chatCompletion.log(error.stack);
             chatCompletion.log('----------------------------------------------------');
         }
+        // A failed build may contain only part of the mandatory context.
+        // Keep that state available for inspection, but never send it live.
+        if (!dryRun) throw error;
     } finally {
         // Pass chat completion to prompt manager for inspection
         promptManager.setChatCompletion(chatCompletion);
@@ -1635,7 +1639,8 @@ export async function prepareOpenAIMessages({
 function getChatCompletionErrorMessage(data, response) {
     const error = data?.error ?? data?.detail?.error;
     const message = typeof error === 'string' ? error : (error?.message || error?.code || error?.type);
-    return String(message || (!response.ok && response.statusText) || t`Unknown error`);
+    const detail = typeof data?.detail === 'string' ? data.detail : undefined;
+    return String(message || data?.message || detail || (!response.ok && response.statusText) || t`Unknown error`);
 }
 
 /**
@@ -1646,36 +1651,15 @@ function getChatCompletionErrorMessage(data, response) {
  * @param {boolean?} [options.quiet=false] Suppress toast messages
  */
 export function tryParseStreamingError(response, decoded, { quiet = false } = {}) {
-    try {
-        const data = JSON.parse(decoded);
+    const data = parseChatCompletionError(decoded);
+    if (!data) return;
 
-        if (!data) {
-            return;
-        }
+    checkQuotaError(data, { quiet });
+    checkModerationError(data, { quiet });
 
-        checkQuotaError(data, { quiet });
-        checkModerationError(data, { quiet });
-
-        // these do not throw correctly (equiv to Error("[object Object]"))
-        // if trying to fix "[object Object]" displayed to users, start here
-
-        if (data.error) {
-            !quiet && toastr.error(getChatCompletionErrorMessage(data, response), 'Chat Completion API');
-            throw new Error(data);
-        }
-
-        if (data.message) {
-            !quiet && toastr.error(data.message, 'Chat Completion API');
-            throw new Error(data);
-        }
-
-        if (data.detail) {
-            !quiet && toastr.error(getChatCompletionErrorMessage(data, response), 'Chat Completion API');
-            throw new Error(data);
-        }
-    } catch {
-        // No JSON. Do nothing.
-    }
+    const message = getChatCompletionErrorMessage(data, response);
+    !quiet && toastr.error(message, 'Chat Completion API');
+    throw new Error(message);
 }
 
 /**
@@ -1694,9 +1678,7 @@ function checkQuotaError(data, { quiet = false } = {}) {
     if (data.quota_error) {
         !quiet && renderTemplateAsync('quotaError').then((html) => Popup.show.text('Quota Error', html));
 
-        // this does not throw correctly (equiv to Error("[object Object]"))
-        // if trying to fix "[object Object]" displayed to users, start here
-        throw new Error(data);
+        throw new Error(getChatCompletionErrorMessage(data, { ok: true }));
     }
 }
 
@@ -3166,25 +3148,32 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
             const swipes = [];
             const toolCalls = [];
             const state = { reasoning: '', images: [], signature: '', toolSignatures: {} };
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) return;
-                const rawData = value.data;
-                if (rawData === '[DONE]') return;
-                tryParseStreamingError(response, rawData);
-                const parsed = JSON.parse(rawData);
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) return;
+                    const rawData = value.data;
+                    if (rawData === '[DONE]') return;
+                    tryParseStreamingError(response, rawData);
+                    const parsed = JSON.parse(rawData);
 
-                if (canMultiSwipe && Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
-                    const swipeIndex = parsed.choices[0].index - 1;
-                    // FIXME: state.reasoning should be an array to support multi-swipe
-                    swipes[swipeIndex] = (swipes[swipeIndex] || '') + getStreamingReply(parsed, state, { overrideShowThoughts: false });
-                } else {
-                    text += getStreamingReply(parsed, state);
+                    if (canMultiSwipe && Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
+                        const swipeIndex = parsed.choices[0].index - 1;
+                        // FIXME: state.reasoning should be an array to support multi-swipe
+                        swipes[swipeIndex] = (swipes[swipeIndex] || '') + getStreamingReply(parsed, state, { overrideShowThoughts: false });
+                    } else {
+                        text += getStreamingReply(parsed, state);
+                    }
+
+                    ToolManager.parseToolCalls(toolCalls, parsed, state.toolSignatures);
+
+                    yield { text, swipes: swipes, logprobs: parseChatCompletionLogprobs(parsed), toolCalls: toolCalls, state: state };
                 }
-
-                ToolManager.parseToolCalls(toolCalls, parsed, state.toolSignatures);
-
-                yield { text, swipes: swipes, logprobs: parseChatCompletionLogprobs(parsed), toolCalls: toolCalls, state: state };
+            } finally {
+                // Also close the fetch when a provider error or the consumer
+                // stops iteration before the HTTP stream has ended.
+                await reader.cancel().catch(() => {});
+                reader.releaseLock();
             }
         };
     } else {
