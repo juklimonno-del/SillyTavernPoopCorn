@@ -54,6 +54,34 @@ describe('bounded token count cache', () => {
         pendingChat.set('lateResult', 99);
         expect(cache.toJSON()).toEqual({ current: { count: 5 } });
     });
+
+    test('reuses unchanged chat snapshots while keeping pending saves isolated', () => {
+        const cache = new TokenCountCache(2, 2);
+        cache.getChat('cold').set('count', 1);
+        cache.getChat('active').set('count', 2);
+        const pendingSave = cache.toJSON();
+        cache.getChat('active').set('count', 3);
+        const nextSave = cache.toJSON();
+        expect(nextSave.cold).toBe(pendingSave.cold);
+        expect(nextSave.active).not.toBe(pendingSave.active);
+        expect(pendingSave.active.count).toBe(2);
+        expect(nextSave.active.count).toBe(3);
+    });
+
+    test('repeated selected-chat lookups and identical values do not dirty saves', () => {
+        const cache = new TokenCountCache(2, 2);
+        const counts = cache.getChat('chat').set('count', 1);
+        const version = cache.version;
+        for (let i = 0; i < 100; i++) {
+            expect(cache.getChat('chat')).toBe(counts);
+            expect(counts.get('count')).toBe(1);
+            counts.set('count', 1);
+        }
+        expect(cache.version).toBe(version);
+        cache.clear();
+        expect(cache.getChat('chat')).not.toBe(counts);
+        expect(cache.getChat('chat').get('count')).toBeUndefined();
+    });
 });
 
 const store = {

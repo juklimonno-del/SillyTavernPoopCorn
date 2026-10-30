@@ -16,9 +16,17 @@ let priorPromptArrayItemForRawPromptDisplay;
 const promptStorage = localforage.createInstance({ name: 'SillyTavern_Prompts' });
 const promptHistory = new PromptHistoryStore(promptStorage);
 export let itemizedPrompts = [];
+let promptRevision = 0;
+let savedPromptState;
+let pendingPromptState;
+
+function samePromptState(a, b) {
+    return a && a.chatId === b.chatId && a.revision === b.revision && a.prompts === b.prompts && a.length === b.length;
+}
 
 /** Keep the latest generated snapshots, including regenerations of older messages. */
 export function addItemizedPrompt(prompt) {
+    promptRevision++;
     const previous = itemizedPrompts.findIndex(item => item.mesId === prompt.mesId);
     if (previous !== -1) itemizedPrompts.splice(previous, 1);
     itemizedPrompts.push(prompt);
@@ -32,6 +40,8 @@ export function addItemizedPrompt(prompt) {
  * @param {string} chatId Chat ID to load
  */
 export async function loadItemizedPrompts(chatId) {
+    savedPromptState = undefined;
+    promptRevision++;
     try {
         if (!chatId) {
             itemizedPrompts = [];
@@ -43,6 +53,7 @@ export async function loadItemizedPrompts(chatId) {
         if (!itemizedPrompts) {
             itemizedPrompts = [];
         }
+        savedPromptState = { chatId, revision: promptRevision, prompts: itemizedPrompts, length: itemizedPrompts.length };
 
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_LOADED, { chatId: chatId });
     } catch {
@@ -54,14 +65,29 @@ export async function loadItemizedPrompts(chatId) {
 /**
  * Saves the itemized prompts for a chat.
  * @param {string} chatId Chat ID to save itemized prompts for
+ * @param {object} [options] Save options
+ * @param {boolean} [options.onlyIfChanged=false] Skip unchanged core chat saves. Explicit extension saves still persist by default.
  */
-export async function saveItemizedPrompts(chatId) {
+export async function saveItemizedPrompts(chatId, { onlyIfChanged = false } = {}) {
     try {
         if (!chatId) {
             return;
         }
 
-        await promptHistory.save(chatId, itemizedPrompts);
+        const state = { chatId, revision: promptRevision, prompts: itemizedPrompts, length: itemizedPrompts.length, promise: null };
+        if (onlyIfChanged && samePromptState(savedPromptState, state)) return;
+        if (onlyIfChanged && samePromptState(pendingPromptState, state)) return await pendingPromptState.promise;
+        state.promise = promptHistory.save(chatId, itemizedPrompts);
+        pendingPromptState = state;
+        try {
+            await state.promise;
+            if (itemizedPrompts === state.prompts && promptRevision === state.revision) {
+                // Do not retain the resolved storage promise and its snapshot slice.
+                savedPromptState = { chatId, revision: state.revision, prompts: state.prompts, length: state.length };
+            }
+        } finally {
+            if (pendingPromptState === state) pendingPromptState = undefined;
+        }
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
         console.log('Error saving itemized prompts for chat', chatId);
@@ -86,6 +112,7 @@ export async function replaceItemizedPromptText(mesId, promptText) {
     }
 
     itemizedPrompt.rawPrompt = promptText;
+    promptRevision++;
 }
 
 /**
@@ -99,6 +126,7 @@ export async function deleteItemizedPrompts(chatId) {
         }
 
         await promptHistory.remove(chatId);
+        if (savedPromptState?.chatId === chatId) savedPromptState = undefined;
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { chatId: chatId, all: false });
     } catch {
         console.log('Error deleting itemized prompts for chat', chatId);
@@ -112,6 +140,8 @@ export async function clearItemizedPrompts() {
     try {
         await promptHistory.clear();
         itemizedPrompts = [];
+        promptRevision++;
+        savedPromptState = undefined;
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { all: true });
     } catch {
         console.log('Error clearing itemized prompts');
@@ -341,21 +371,13 @@ export async function promptItemize(itemizedPrompts, requestedMesId) {
     await popup.show();
 }
 
-async function migratePromptHistory() {
-    const marker = 'SillyTavern_PromptHistory_50_v1';
-    try {
-        if (localStorage.getItem(marker) === 'complete') return;
-    } catch { /* Storage can be disabled by browser policy. */ }
-
-    // Shrink existing histories too, without requiring every old chat to be opened.
-    await promptHistory.pruneAll();
-    try {
-        localStorage.setItem(marker, 'complete');
-    } catch { /* Loads and saves still enforce the limit without a marker. */ }
-}
-
 export function initItemizedPrompts() {
-    void migratePromptHistory().catch(error => console.warn('Unable to trim prompt history', error));
+    // Old histories are trimmed when opened. Scanning all chats on startup can
+    // deserialize hundreds of megabytes and compete with interaction on phones.
+    registerDebugFunction('trimPrompts', 'Trim old prompt history', 'Keeps the latest 50 prompt snapshots per chat. Scans all saved prompt histories and may take a while; chat messages are not changed.', async () => {
+        await promptHistory.pruneAll();
+        toastr.info('Prompt history trimmed to the latest 50 snapshots per chat.');
+    });
     registerDebugFunction('clearPrompts', 'Delete itemized prompts', 'Deletes all itemized prompts from the local storage.', async () => {
         await clearItemizedPrompts();
         toastr.info('Itemized prompts deleted.');
@@ -400,6 +422,7 @@ export function swapItemizedPrompts(sourceMessageId, targetMessageId) {
     targetPrompts.forEach(prompt => {
         prompt.mesId = sourceMessageId;
     });
+    if (sourcePrompts.length || targetPrompts.length) promptRevision++;
 
     // Moving a message must not change when its snapshot was generated.
 }
@@ -415,6 +438,7 @@ export function deleteItemizedPromptForMessage(messageId) {
     }
 
     itemizedPrompts = itemizedPrompts.filter(x => x.mesId !== messageId);
+    promptRevision++;
 
     for (const prompt of itemizedPrompts.filter(x => x.mesId > messageId)) {
         prompt.mesId -= 1;

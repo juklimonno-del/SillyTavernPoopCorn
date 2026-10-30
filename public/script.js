@@ -1598,7 +1598,7 @@ export async function clearChat({ clearData = false } = {}) {
         $('.zoomed_avatar[forChar]').remove();
     } else { console.debug('saw no avatars'); }
 
-    await saveItemizedPrompts(getCurrentChatId());
+    await saveItemizedPrompts(getCurrentChatId(), { onlyIfChanged: true });
     itemizedPrompts.length = 0;
 
     if (clearData) chat.length = 0;
@@ -9424,7 +9424,7 @@ export async function saveChatConditional() {
 
         // Save token and prompts cache to IndexedDB storage
         saveTokenCache();
-        saveItemizedPrompts(getCurrentChatId());
+        saveItemizedPrompts(getCurrentChatId(), { onlyIfChanged: true });
     } catch (error) {
         console.error('Error saving chat', error);
     } finally {

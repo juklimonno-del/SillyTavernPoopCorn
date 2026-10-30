@@ -461,9 +461,9 @@ async function loadThumbnail(bg, isCustom) {
 
     try {
         const url = isCustom ? bg : getBackgroundPath(bg);
-        // This full-size source is only needed to generate a small thumbnail.
-        // Keep the thumbnail, not another disk-cached copy of the animation.
-        const response = await fetch(url, { cache: 'no-store' });
+        // Reuse normal HTTP caching when a disposable thumbnail was evicted.
+        // Bypassing it forces another full animation download before decoding.
+        const response = await fetch(url, { cache: 'default' });
         if (!response.ok) {
             throw new Error('Fetch failed with status: ' + response.status);
         }
@@ -729,8 +729,6 @@ function renderChatBackgrounds(backgrounds) {
 }
 
 export async function getBackgrounds() {
-    // Also shrink thumbnail stores left over from earlier, unbounded versions.
-    void THUMBNAIL_STORAGE.prune().catch(error => console.warn('Could not prune thumbnail cache:', error));
     const response = await fetch('/api/backgrounds/all', {
         method: 'POST',
         headers: getRequestHeaders(),

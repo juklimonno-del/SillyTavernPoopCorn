@@ -65,7 +65,7 @@ describe('background thumbnail loading', () => {
         expect(new Set(urls)).toEqual(new Set(['blob:thumbnail']));
         expect(createThumbnail).toHaveBeenCalledTimes(1);
         expect(createUrl).toHaveBeenCalledTimes(1);
-        expect(fetchMock).toHaveBeenCalledWith('backgrounds/scene.gif', { cache: 'no-store' });
+        expect(fetchMock).toHaveBeenCalledWith('backgrounds/scene.gif', { cache: 'default' });
         expect(values.get('scene.gif')).toBe(thumbnail);
     });
 
@@ -78,7 +78,7 @@ describe('background thumbnail loading', () => {
     test('an unreadable store still generates a thumbnail from the source', async () => {
         storage.getItem.mockRejectedValueOnce(new Error('storage unavailable'));
         expect(await getThumbnailFromStorage('/user/images/custom.gif', true)).toBe('blob:thumbnail');
-        expect(fetchMock).toHaveBeenCalledWith('/user/images/custom.gif', { cache: 'no-store' });
+        expect(fetchMock).toHaveBeenCalledWith('/user/images/custom.gif', { cache: 'default' });
         expect(createThumbnail).toHaveBeenCalledTimes(1);
     });
 

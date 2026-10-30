@@ -1,4 +1,4 @@
-import { describe, expect, test } from '@jest/globals';
+import { describe, expect, jest, test } from '@jest/globals';
 import { ThumbnailCache } from '../public/scripts/thumbnail-cache.js';
 
 function makeStorage(initial = []) {
@@ -18,6 +18,33 @@ const blob = size => new Blob([new Uint8Array(size)]);
 const storedBytes = storage => [...storage.data.values()].reduce((total, value) => total + value.size, 0);
 
 describe('bounded background thumbnail cache', () => {
+    test('a cold cache hit does not scan or prune unrelated persisted thumbnails', async () => {
+        const storage = makeStorage(Array.from({ length: 200 }, (_, index) => [String(index), blob(100)]));
+        storage.iterate = jest.fn(storage.iterate);
+        const cache = new ThumbnailCache(storage);
+        expect((await cache.get('199')).size).toBe(100);
+        expect(storage.iterate).not.toHaveBeenCalled();
+        expect(storage.data.size).toBe(200);
+        // Limits are still applied before storing new disposable data.
+        await cache.set('new', blob(100));
+        expect(storage.data.size).toBe(128);
+        expect(storage.data.has('199')).toBe(true);
+    });
+
+    test('cache hits issue concurrent reads instead of waiting for previous reads', async () => {
+        const storage = makeStorage();
+        const releases = [];
+        storage.getItem = jest.fn(() => new Promise(resolve => releases.push(resolve)));
+        storage.iterate = jest.fn(storage.iterate);
+        const cache = new ThumbnailCache(storage);
+        const reads = Array.from({ length: 20 }, (_, index) => cache.get(String(index)));
+        await Promise.resolve();
+        expect(storage.getItem).toHaveBeenCalledTimes(20);
+        expect(storage.iterate).not.toHaveBeenCalled();
+        for (const release of releases) release(blob(3));
+        expect(await Promise.all(reads)).toHaveLength(20);
+    });
+
     test('prunes an existing unbounded store before use without changing surviving Blobs', async () => {
         const storage = makeStorage(Array.from({ length: 200 }, (_, index) => [String(index), blob(100)]));
         const survivor = storage.data.get('199');

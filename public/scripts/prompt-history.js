@@ -13,15 +13,19 @@ export class PromptHistoryStore {
     constructor(storage) {
         this.storage = storage;
         this.pending = Promise.resolve();
+        this.queuedSave = null;
     }
 
     run(operation) {
+        // Reads/deletes are ordering barriers: never merge a later save across them.
+        this.queuedSave = null;
         const result = this.pending.then(() => {
             // Coordinate migration with saves in other updated tabs, where supported.
             const locks = globalThis.navigator?.locks;
             return locks ? locks.request('SillyTavern_PromptHistory', operation) : operation();
         });
-        this.pending = result.catch(() => {});
+        // The queue tail must not retain the last loaded history in memory.
+        this.pending = result.then(() => {}, () => {});
         return result;
     }
 
@@ -45,7 +49,17 @@ export class PromptHistoryStore {
     save(chatId, prompts) {
         // Capture this chat's array before waiting for other storage operations.
         const recent = recentPrompts(prompts);
-        return this.run(() => this.storage.setItem(chatId, recent));
+        if (this.queuedSave?.chatId === chatId) {
+            this.queuedSave.prompts = recent;
+            return this.queuedSave.promise;
+        }
+        const entry = { chatId, prompts: recent, promise: null };
+        entry.promise = this.run(() => {
+            if (this.queuedSave === entry) this.queuedSave = null;
+            return this.storage.setItem(chatId, entry.prompts);
+        });
+        this.queuedSave = entry;
+        return entry.promise;
     }
 
     remove(chatId) {

@@ -5,13 +5,16 @@ class TokenCounts extends Map {
         super();
         this.limit = limit;
         this.onChange = onChange;
+        this.lastKey = undefined;
+        this.snapshot = null;
     }
 
     get(key) {
         const value = super.get(key);
-        if (super.has(key)) {
+        if (value !== undefined && key !== this.lastKey) {
             super.delete(key);
             super.set(key, value);
+            this.lastKey = key;
         }
         return value;
     }
@@ -20,13 +23,25 @@ class TokenCounts extends Map {
         if (!Number.isFinite(value)) {
             return this;
         }
+        if (super.get(key) === value) {
+            this.get(key);
+            return this;
+        }
         super.delete(key);
         super.set(key, value);
+        this.lastKey = key;
         if (this.size > this.limit) {
             super.delete(this.keys().next().value);
         }
+        this.snapshot = null;
         this.onChange();
         return this;
+    }
+
+    toJSON() {
+        // A save normally changes one chat. Reuse immutable snapshots for all
+        // other chats instead of rebuilding tens of thousands of properties.
+        return this.snapshot ??= Object.fromEntries(this);
     }
 }
 
@@ -37,10 +52,15 @@ export class TokenCountCache {
         this.maxCountsPerChat = maxCountsPerChat;
         this.chats = new Map();
         this.version = 0;
+        this.currentChatId = undefined;
+        this.currentCounts = undefined;
     }
 
     getChat(chatId) {
         const key = String(chatId);
+        // Tokenization requests usually all belong to the selected chat. Do not
+        // delete/reinsert its Map entry on every token-count lookup.
+        if (key === this.currentChatId) return this.currentCounts;
         let counts = this.chats.get(key);
         if (!counts) {
             counts = new TokenCounts(this.maxCountsPerChat, () => this.version++);
@@ -51,11 +71,15 @@ export class TokenCountCache {
         if (this.chats.size > this.maxChats) {
             this.chats.delete(this.chats.keys().next().value);
         }
+        this.currentChatId = key;
+        this.currentCounts = counts;
         return counts;
     }
 
     clear() {
         this.chats.clear();
+        this.currentChatId = undefined;
+        this.currentCounts = undefined;
         this.version++;
     }
 
@@ -77,6 +101,6 @@ export class TokenCountCache {
     }
 
     toJSON() {
-        return Object.fromEntries(Array.from(this.chats, ([chatId, counts]) => [chatId, Object.fromEntries(counts)]));
+        return Object.fromEntries(Array.from(this.chats, ([chatId, counts]) => [chatId, counts.toJSON()]));
     }
 }

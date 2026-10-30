@@ -34,6 +34,28 @@ describe('bounded diagnostic prompt history', () => {
         expect(storage.data.get('chat')).toEqual(snapshots(90).slice(-50));
     });
 
+    test('coalesces a burst of pending saves into the latest snapshot', async () => {
+        const storage = makeStorage();
+        const store = new PromptHistoryStore(storage);
+        await Promise.all(Array.from({ length: 100 }, (_, i) => store.save('chat', snapshots(i + 1))));
+        expect(storage.setItem).toHaveBeenCalledTimes(1);
+        expect(storage.data.get('chat')).toEqual(snapshots(100).slice(-50));
+        expect(await store.pending).toBeUndefined();
+    });
+
+    test('coalescing never moves a later save before a read or delete', async () => {
+        const storage = makeStorage();
+        const store = new PromptHistoryStore(storage);
+        const first = store.save('chat', snapshots(1));
+        const read = store.load('chat');
+        const removed = store.remove('chat');
+        const last = store.save('chat', snapshots(2));
+        await Promise.all([first, read, removed, last]);
+        expect(await read).toEqual(snapshots(1));
+        expect(storage.data.get('chat')).toEqual(snapshots(2));
+        expect(storage.setItem).toHaveBeenCalledTimes(2);
+    });
+
     test('a new save wins over an in-progress migration', async () => {
         const storage = makeStorage([['chat', snapshots(100)]]);
         const store = new PromptHistoryStore(storage);
@@ -82,8 +104,9 @@ describe('bounded diagnostic prompt history', () => {
 });
 
 // Exercise the real integration while isolating unrelated UI modules.
+const integrationStorage = makeStorage();
 jest.unstable_mockModule('../public/lib.js', () => ({
-    DiffMatchPatch: {}, DOMPurify: {}, localforage: { createInstance: () => makeStorage() },
+    DiffMatchPatch: {}, DOMPurify: {}, localforage: { createInstance: () => integrationStorage },
 }));
 jest.unstable_mockModule('../public/script.js', () => ({
     chat: [], event_types: {}, eventSource: { emit: jest.fn() },
@@ -109,4 +132,32 @@ test('generation retains 50 snapshots in memory and refreshes regenerated older 
     expect(prompts.itemizedPrompts).toHaveLength(50);
     expect(prompts.itemizedPrompts.find(x => x.mesId === 49).rawPrompt).toBe('Regenerated');
     expect(prompts.itemizedPrompts.find(x => x.mesId === 51)).toBeUndefined();
+});
+
+test('core chat saves skip unchanged diagnostics while edits and explicit saves persist', async () => {
+    const prompts = await import('../public/scripts/itemized-prompts.js');
+    await prompts.clearItemizedPrompts();
+    integrationStorage.setItem.mockClear();
+    prompts.addItemizedPrompt({ mesId: 1, rawPrompt: 'Large context '.repeat(1000) });
+    await Promise.all(Array.from({ length: 100 }, () => prompts.saveItemizedPrompts('chat', { onlyIfChanged: true })));
+    await prompts.saveItemizedPrompts('chat', { onlyIfChanged: true });
+    expect(integrationStorage.setItem).toHaveBeenCalledTimes(1);
+    await prompts.replaceItemizedPromptText(1, 'Edited');
+    await prompts.saveItemizedPrompts('chat', { onlyIfChanged: true });
+    expect(integrationStorage.data.get('chat')[0].rawPrompt).toBe('Edited');
+    await prompts.loadItemizedPrompts('chat');
+    await prompts.saveItemizedPrompts('chat', { onlyIfChanged: true });
+    expect(integrationStorage.setItem).toHaveBeenCalledTimes(2);
+    await prompts.saveItemizedPrompts('chat');
+    expect(integrationStorage.setItem).toHaveBeenCalledTimes(3);
+});
+
+test('a failed core save remains retryable', async () => {
+    const prompts = await import('../public/scripts/itemized-prompts.js');
+    await prompts.clearItemizedPrompts();
+    integrationStorage.setItem.mockRejectedValueOnce(new Error('quota exceeded'));
+    prompts.addItemizedPrompt({ mesId: 1, rawPrompt: 'Retry me' });
+    await Promise.all([prompts.saveItemizedPrompts('chat', { onlyIfChanged: true }), prompts.saveItemizedPrompts('chat', { onlyIfChanged: true })]);
+    await prompts.saveItemizedPrompts('chat', { onlyIfChanged: true });
+    expect(integrationStorage.data.get('chat')[0].rawPrompt).toBe('Retry me');
 });
