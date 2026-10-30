@@ -10,6 +10,7 @@ import { callGenericPopup, Popup, POPUP_TYPE } from './popup.js';
 import { groups, selected_group } from './group-chats.js';
 import { humanizedDateTime } from './RossAscends-mods.js';
 import { deleteMediaFromServer } from './chats.js';
+import { ThumbnailCache } from './thumbnail-cache.js';
 
 const BG_METADATA_KEY = 'custom_background';
 const LIST_METADATA_KEY = 'chat_backgrounds';
@@ -27,7 +28,6 @@ let isBackgroundSelectionMode = false;
 
 // A single transparent PNG pixel used as a placeholder for errored backgrounds
 const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
-const PNG_PIXEL_BLOB = new Blob([Uint8Array.from(atob(PNG_PIXEL), c => c.charCodeAt(0))], { type: 'image/png' });
 const PLACEHOLDER_IMAGE = `url('data:image/png;base64,${PNG_PIXEL}')`;
 
 const THUMBNAIL_COLUMNS_MIN = 2;
@@ -39,7 +39,10 @@ const THUMBNAIL_COLUMNS_DEFAULT_MOBILE = 3;
  * Storage for frontend-generated background thumbnails.
  * This is used to store thumbnails for backgrounds that cannot be generated on the server.
  */
-const THUMBNAIL_STORAGE = localforage.createInstance({ name: 'SillyTavern_Thumbnails' });
+const THUMBNAIL_STORAGE = new ThumbnailCache(localforage.createInstance({ name: 'SillyTavern_Thumbnails' }));
+
+/** @type {Map<string, Promise<string>>} */
+const THUMBNAIL_REQUESTS = new Map();
 
 /**
  * Cache for thumbnail blob URLs.
@@ -428,22 +431,39 @@ async function onCopyToSystemBackgroundClick(e) {
  * @param {boolean} isCustom Is the background custom?
  * @returns {Promise<string>} Blob URL of the thumbnail
  */
-async function getThumbnailFromStorage(bg, isCustom) {
+export async function getThumbnailFromStorage(bg, isCustom) {
     const cachedBlobUrl = THUMBNAIL_BLOBS.get(bg);
     if (cachedBlobUrl) {
         return cachedBlobUrl;
     }
 
-    const savedBlob = await THUMBNAIL_STORAGE.getItem(bg);
-    if (savedBlob) {
-        const savedBlobUrl = URL.createObjectURL(savedBlob);
-        THUMBNAIL_BLOBS.set(bg, savedBlobUrl);
-        return savedBlobUrl;
+    if (THUMBNAIL_REQUESTS.has(bg)) {
+        return THUMBNAIL_REQUESTS.get(bg);
+    }
+
+    const request = loadThumbnail(bg, isCustom).finally(() => THUMBNAIL_REQUESTS.delete(bg));
+    THUMBNAIL_REQUESTS.set(bg, request);
+    return request;
+}
+
+async function loadThumbnail(bg, isCustom) {
+    // Storage may be unavailable or full; that must not hide a valid thumbnail.
+    try {
+        const savedBlob = await THUMBNAIL_STORAGE.get(bg);
+        if (savedBlob) {
+            const savedBlobUrl = URL.createObjectURL(savedBlob);
+            THUMBNAIL_BLOBS.set(bg, savedBlobUrl);
+            return savedBlobUrl;
+        }
+    } catch (error) {
+        console.warn('Could not read thumbnail cache:', error);
     }
 
     try {
         const url = isCustom ? bg : getBackgroundPath(bg);
-        const response = await fetch(url, { cache: 'force-cache' });
+        // This full-size source is only needed to generate a small thumbnail.
+        // Keep the thumbnail, not another disk-cached copy of the animation.
+        const response = await fetch(url, { cache: 'no-store' });
         if (!response.ok) {
             throw new Error('Fetch failed with status: ' + response.status);
         }
@@ -451,16 +471,18 @@ async function getThumbnailFromStorage(bg, isCustom) {
         const imageBase64 = await getBase64Async(imageBlob);
         const thumbnailBase64 = await createThumbnail(imageBase64, THUMBNAIL_CONFIG.width, THUMBNAIL_CONFIG.height);
         const thumbnailBlob = await fetch(thumbnailBase64).then(res => res.blob());
-        await THUMBNAIL_STORAGE.setItem(bg, thumbnailBlob);
+        try {
+            await THUMBNAIL_STORAGE.set(bg, thumbnailBlob);
+        } catch (error) {
+            console.warn('Could not save thumbnail cache:', error);
+        }
         const blobUrl = URL.createObjectURL(thumbnailBlob);
         THUMBNAIL_BLOBS.set(bg, blobUrl);
         return blobUrl;
     } catch (error) {
         console.error('Error fetching thumbnail, fallback image will be used:', error);
-        const fallbackBlob = PNG_PIXEL_BLOB;
-        const fallbackBlobUrl = URL.createObjectURL(fallbackBlob);
-        THUMBNAIL_BLOBS.set(bg, fallbackBlobUrl);
-        return fallbackBlobUrl;
+        // Do not retain a failed load forever or allocate a Blob for a fallback.
+        return `data:image/png;base64,${PNG_PIXEL}`;
     }
 }
 
@@ -606,6 +628,7 @@ async function onDeleteBackgroundClick(e) {
         }
 
         if (isCustom) {
+            await clearThumbnail(bg);
             if (deleteFromServer) {
                 await deleteMediaFromServer(bg);
             }
@@ -706,6 +729,8 @@ function renderChatBackgrounds(backgrounds) {
 }
 
 export async function getBackgrounds() {
+    // Also shrink thumbnail stores left over from earlier, unbounded versions.
+    void THUMBNAIL_STORAGE.prune().catch(error => console.warn('Could not prune thumbnail cache:', error));
     const response = await fetch('/api/backgrounds/all', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -1455,7 +1480,17 @@ async function delBackground(bg) {
         }),
     });
 
-    await THUMBNAIL_STORAGE.removeItem(bg);
+    await clearThumbnail(bg);
+}
+
+async function clearThumbnail(bg) {
+    // Wait for generation before removal so it cannot reinsert a deleted entry.
+    await THUMBNAIL_REQUESTS.get(bg);
+    try {
+        await THUMBNAIL_STORAGE.remove(bg);
+    } catch (error) {
+        console.warn('Could not remove cached thumbnail:', error);
+    }
     if (THUMBNAIL_BLOBS.has(bg)) {
         URL.revokeObjectURL(THUMBNAIL_BLOBS.get(bg));
         THUMBNAIL_BLOBS.delete(bg);

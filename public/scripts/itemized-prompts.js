@@ -8,12 +8,24 @@ import { isMobile } from './RossAscends-mods.js';
 import { renderTemplateAsync } from './templates.js';
 import { getFriendlyTokenizerName, getTokenCountAsync } from './tokenizers.js';
 import { copyText } from './utils.js';
+import { PromptHistoryStore, PROMPT_HISTORY_LIMIT } from './prompt-history.js';
 
 let PromptArrayItemForRawPromptDisplay;
 let priorPromptArrayItemForRawPromptDisplay;
 
 const promptStorage = localforage.createInstance({ name: 'SillyTavern_Prompts' });
+const promptHistory = new PromptHistoryStore(promptStorage);
 export let itemizedPrompts = [];
+
+/** Keep the latest generated snapshots, including regenerations of older messages. */
+export function addItemizedPrompt(prompt) {
+    const previous = itemizedPrompts.findIndex(item => item.mesId === prompt.mesId);
+    if (previous !== -1) itemizedPrompts.splice(previous, 1);
+    itemizedPrompts.push(prompt);
+    if (itemizedPrompts.length > PROMPT_HISTORY_LIMIT) {
+        itemizedPrompts.splice(0, itemizedPrompts.length - PROMPT_HISTORY_LIMIT);
+    }
+}
 
 /**
  * Gets the itemized prompts for a chat.
@@ -26,7 +38,7 @@ export async function loadItemizedPrompts(chatId) {
             return;
         }
 
-        itemizedPrompts = await promptStorage.getItem(chatId);
+        itemizedPrompts = await promptHistory.load(chatId);
 
         if (!itemizedPrompts) {
             itemizedPrompts = [];
@@ -49,7 +61,7 @@ export async function saveItemizedPrompts(chatId) {
             return;
         }
 
-        await promptStorage.setItem(chatId, itemizedPrompts);
+        await promptHistory.save(chatId, itemizedPrompts);
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
         console.log('Error saving itemized prompts for chat', chatId);
@@ -86,7 +98,7 @@ export async function deleteItemizedPrompts(chatId) {
             return;
         }
 
-        await promptStorage.removeItem(chatId);
+        await promptHistory.remove(chatId);
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { chatId: chatId, all: false });
     } catch {
         console.log('Error deleting itemized prompts for chat', chatId);
@@ -98,7 +110,7 @@ export async function deleteItemizedPrompts(chatId) {
  */
 export async function clearItemizedPrompts() {
     try {
-        await promptStorage.clear();
+        await promptHistory.clear();
         itemizedPrompts = [];
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { all: true });
     } catch {
@@ -230,15 +242,13 @@ export function findItemizedPromptSet(itemizedPrompts, incomingMesId) {
     priorPromptArrayItemForRawPromptDisplay = -1;
 
     for (let i = 0; i < itemizedPrompts.length; i++) {
-        console.log(`looking for ${incomingMesId} vs ${itemizedPrompts[i].mesId}`);
         if (itemizedPrompts[i].mesId === incomingMesId) {
-            console.log(`found matching mesID ${i}`);
             thisPromptSet = i;
             PromptArrayItemForRawPromptDisplay = i;
-            console.log(`wanting to raw display of ArrayItem: ${PromptArrayItemForRawPromptDisplay} which is mesID ${incomingMesId}`);
-            console.log(itemizedPrompts[thisPromptSet]);
-            break;
-        } else if (itemizedPrompts[i].rawPrompt) {
+        } else if (itemizedPrompts[i].rawPrompt && itemizedPrompts[i].mesId < incomingMesId
+            && (priorPromptArrayItemForRawPromptDisplay < 0 || itemizedPrompts[i].mesId > itemizedPrompts[priorPromptArrayItemForRawPromptDisplay].mesId)) {
+            // History is ordered by generation recency; the diff still compares
+            // against the preceding retained message in the chat.
             priorPromptArrayItemForRawPromptDisplay = i;
         }
     }
@@ -252,8 +262,7 @@ export async function promptItemize(itemizedPrompts, requestedMesId) {
     var thisPromptSet = findItemizedPromptSet(itemizedPrompts, incomingMesId);
 
     if (thisPromptSet === undefined) {
-        console.log(`couldnt find the right mesId. looked for ${incomingMesId}`);
-        console.log(itemizedPrompts);
+        toastr.info('No prompt snapshot is available for this message. The latest 50 snapshots per chat are retained.');
         return null;
     }
 
@@ -332,7 +341,21 @@ export async function promptItemize(itemizedPrompts, requestedMesId) {
     await popup.show();
 }
 
+async function migratePromptHistory() {
+    const marker = 'SillyTavern_PromptHistory_50_v1';
+    try {
+        if (localStorage.getItem(marker) === 'complete') return;
+    } catch { /* Storage can be disabled by browser policy. */ }
+
+    // Shrink existing histories too, without requiring every old chat to be opened.
+    await promptHistory.pruneAll();
+    try {
+        localStorage.setItem(marker, 'complete');
+    } catch { /* Loads and saves still enforce the limit without a marker. */ }
+}
+
 export function initItemizedPrompts() {
+    void migratePromptHistory().catch(error => console.warn('Unable to trim prompt history', error));
     registerDebugFunction('clearPrompts', 'Delete itemized prompts', 'Deletes all itemized prompts from the local storage.', async () => {
         await clearItemizedPrompts();
         toastr.info('Itemized prompts deleted.');
@@ -378,7 +401,7 @@ export function swapItemizedPrompts(sourceMessageId, targetMessageId) {
         prompt.mesId = sourceMessageId;
     });
 
-    itemizedPrompts.sort((a, b) => a.mesId - b.mesId);
+    // Moving a message must not change when its snapshot was generated.
 }
 
 /**

@@ -1,4 +1,5 @@
 import { localforage } from '../lib.js';
+import { TokenCountCache } from './token-count-cache.js';
 import { characters, event_types, eventSource, main_api, nai_settings, online_status, this_chid } from '../script.js';
 import { power_user, registerDebugFunction } from './power-user.js';
 import { chat_completion_sources, model_list, oai_settings } from './openai.js';
@@ -156,7 +157,9 @@ const TOKENIZER_URLS = {
 const textEncoder = new TextEncoder();
 const objectStore = localforage.createInstance({ name: 'SillyTavern_ChatCompletions' });
 
-let tokenCache = {};
+const tokenCache = new TokenCountCache();
+let savedTokenCacheVersion = -1;
+let tokenCacheSave = Promise.resolve();
 
 /**
  * Guesstimates the token count for a string.
@@ -171,27 +174,42 @@ export function guesstimate(str) {
 async function loadTokenCache() {
     try {
         console.debug('Chat Completions: loading token cache');
-        tokenCache = await objectStore.getItem('tokenCache') || {};
+        tokenCache.load(await objectStore.getItem('tokenCache'));
     } catch (e) {
         console.log('Chat Completions: unable to load token cache, using default value', e);
-        tokenCache = {};
+        tokenCache.clear();
     }
 }
 
 export async function saveTokenCache() {
-    try {
-        console.debug('Chat Completions: saving token cache');
-        await objectStore.setItem('tokenCache', tokenCache);
-    } catch (e) {
-        console.log('Chat Completions: unable to save token cache', e);
-    }
+    // Chat saves can overlap. Serialize writes and skip unchanged counts rather
+    // than repeatedly cloning the entire cache into IndexedDB.
+    tokenCacheSave = tokenCacheSave.then(async () => {
+        if (savedTokenCacheVersion === tokenCache.version) {
+            return;
+        }
+        try {
+            const version = tokenCache.version;
+            await objectStore.setItem('tokenCache', tokenCache.toJSON());
+            savedTokenCacheVersion = version;
+        } catch (e) {
+            console.log('Chat Completions: unable to save token cache', e);
+        }
+    });
+    return tokenCacheSave;
 }
 
 async function resetTokenCache() {
     try {
         console.debug('Chat Completions: resetting token cache');
-        Object.keys(tokenCache).forEach(key => delete tokenCache[key]);
-        await objectStore.removeItem('tokenCache');
+        tokenCache.clear();
+        const reset = tokenCacheSave.then(async () => {
+            await objectStore.removeItem('tokenCache');
+            savedTokenCacheVersion = -1;
+        });
+        // Keep the write queue usable even if removing IndexedDB data fails.
+        tokenCacheSave = reset.catch(() => {});
+        await reset;
         toastr.success('Token cache cleared. Please reload the chat to re-tokenize it.');
     } catch (e) {
         console.log('Chat Completions: unable to reset token cache', e);
@@ -474,8 +492,9 @@ export async function getTokenCountAsync(str, padding = undefined) {
     const hash = getStringHash(str);
     const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
 
-    if (typeof cacheObject[cacheKey] === 'number') {
-        return cacheObject[cacheKey];
+    const cachedCount = cacheObject.get(cacheKey);
+    if (typeof cachedCount === 'number') {
+        return cachedCount;
     }
 
     const result = (await callTokenizerAsync(tokenizerType, str)) + padding;
@@ -485,7 +504,7 @@ export async function getTokenCountAsync(str, padding = undefined) {
         return 0;
     }
 
-    cacheObject[cacheKey] = result;
+    cacheObject.set(cacheKey, result);
     return result;
 }
 
@@ -530,8 +549,9 @@ export function getTokenCount(str, padding = undefined) {
     const hash = getStringHash(str);
     const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
 
-    if (typeof cacheObject[cacheKey] === 'number') {
-        return cacheObject[cacheKey];
+    const cachedCount = cacheObject.get(cacheKey);
+    if (typeof cachedCount === 'number') {
+        return cachedCount;
     }
 
     const result = callTokenizer(tokenizerType, str) + padding;
@@ -541,7 +561,7 @@ export function getTokenCount(str, padding = undefined) {
         return 0;
     }
 
-    cacheObject[cacheKey] = result;
+    cacheObject.set(cacheKey, result);
     return result;
 }
 
@@ -812,7 +832,7 @@ export function countTokensOpenAI(messages, full = false) {
 
         const hash = getStringHash(JSON.stringify(message));
         const cacheKey = `${model}-${hash}`;
-        const cachedCount = cacheObject[cacheKey];
+        const cachedCount = cacheObject.get(cacheKey);
 
         if (typeof cachedCount === 'number') {
             token_count += cachedCount;
@@ -826,7 +846,7 @@ export function countTokensOpenAI(messages, full = false) {
                 contentType: 'application/json',
                 success: function (data) {
                     token_count += Number(data.token_count);
-                    cacheObject[cacheKey] = Number(data.token_count);
+                    cacheObject.set(cacheKey, Number(data.token_count));
                 },
             });
         }
@@ -862,7 +882,7 @@ export async function countTokensOpenAIAsync(messages, full = false) {
 
         const hash = getStringHash(JSON.stringify(message));
         const cacheKey = `${model}-${hash}`;
-        const cachedCount = cacheObject[cacheKey];
+        const cachedCount = cacheObject.get(cacheKey);
 
         if (typeof cachedCount === 'number') {
             token_count += cachedCount;
@@ -877,7 +897,7 @@ export async function countTokensOpenAIAsync(messages, full = false) {
             });
 
             token_count += Number(data.token_count);
-            cacheObject[cacheKey] = Number(data.token_count);
+            cacheObject.set(cacheKey, Number(data.token_count));
         }
     }
 
@@ -888,7 +908,7 @@ export async function countTokensOpenAIAsync(messages, full = false) {
 
 /**
  * Gets the token cache object for the current chat.
- * @returns {Object} Token cache object for the current chat.
+ * @returns {Map<string, number>} Token cache for the current chat.
  */
 function getTokenCacheObject() {
     let chatId = 'undefined';
@@ -903,11 +923,7 @@ function getTokenCacheObject() {
         console.log('No character / group selected. Using default cache item');
     }
 
-    if (typeof tokenCache[chatId] !== 'object') {
-        tokenCache[chatId] = {};
-    }
-
-    return tokenCache[String(chatId)];
+    return tokenCache.getChat(chatId);
 }
 
 /**

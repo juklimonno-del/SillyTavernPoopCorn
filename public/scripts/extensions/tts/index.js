@@ -330,6 +330,12 @@ let currentAudioJob;
 let audioPaused = false;
 let audioQueueProcessorReady = true;
 
+function onAudioCanPlay() {
+    console.debug('Starting TTS playback');
+    audioElement.playbackRate = extension_settings.tts.playback_rate;
+    audioElement.play();
+}
+
 /**
  * Play audio data from audio job object.
  * @param {AudioJob} audioJob Audio job object
@@ -337,18 +343,24 @@ let audioQueueProcessorReady = true;
  */
 async function playAudioData(audioJob) {
     const { audioBlob, char } = audioJob;
-    // Since current audio job can be cancelled, don't playback if it is null
-    if (currentAudioJob == null) {
-        console.log('Cancelled TTS playback because currentAudioJob was null');
+    // A stopped or replaced job must not resume after asynchronous preparation.
+    if (currentAudioJob !== audioJob) {
+        return;
     }
     if (audioBlob instanceof Blob) {
         const srcUrl = await getBase64Async(audioBlob);
+        if (currentAudioJob !== audioJob) {
+            return;
+        }
 
         // VRM lip sync
         if (extension_settings.vrm?.enabled && typeof globalThis.vrmLipSync === 'function') {
             await globalThis.vrmLipSync(audioBlob, char);
         }
 
+        if (currentAudioJob !== audioJob) {
+            return;
+        }
         audioElement.src = srcUrl;
     } else if (typeof audioBlob === 'string') {
         audioElement.src = audioBlob;
@@ -356,11 +368,8 @@ async function playAudioData(audioJob) {
         throw `TTS received invalid audio data type ${typeof audioBlob}`;
     }
     audioElement.addEventListener('ended', completeCurrentAudioJob);
-    audioElement.addEventListener('canplay', () => {
-        console.debug('Starting TTS playback');
-        audioElement.playbackRate = extension_settings.tts.playback_rate;
-        audioElement.play();
-    });
+    // Reusing one listener lets EventTarget deduplicate it across audio jobs.
+    audioElement.addEventListener('canplay', onAudioCanPlay);
 }
 
 globalThis.tts_preview = function (id) {
