@@ -1311,6 +1311,9 @@ function setReasoningEventHandlers() {
         }
 
         const textarea = messageBlock.find('.reasoning_edit_textarea');
+        // The editor may already have been consumed by another delegated handler
+        // or a repeated click. Never save String(undefined) as the reasoning.
+        if (!textarea.length) return;
         let newReasoning = String(textarea.val());
         newReasoning = substituteParams(newReasoning);
         textarea.remove();

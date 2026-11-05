@@ -47,6 +47,24 @@ function createEditableReasoningMessageHtml({ detailsAttributes = 'data-has-cont
 test.describe('Reasoning hidden blocks', () => {
     test.beforeEach(testSetup.awaitST);
 
+    test('does not overwrite reasoning when Done has no active editor', async ({ page }) => {
+        const result = await page.evaluate(async (messageHtml) => {
+            const reasoningModule = await import('/scripts/reasoning.js');
+            reasoningModule.initReasoning();
+            reasoningModule.initReasoning();
+            const context = window.SillyTavern.getContext();
+            context.chat.length = 0;
+            context.chat.push({ extra: { reasoning: 'Original reasoning' }, name: 'Test', mes: 'Answer' });
+            const chat = document.getElementById('chat');
+            chat.innerHTML = messageHtml;
+            chat.querySelector('.mes_reasoning_edit_done').click();
+            return { reasoning: context.chat[0].extra.reasoning, editors: chat.querySelectorAll('.reasoning_edit_textarea').length };
+        }, createEditableReasoningMessageHtml({ detailsAttributes: 'data-has-content="true"', includeMessageContainers: true }));
+
+        expect(result.reasoning).toBe('Original reasoning');
+        expect(result.editors).toBe(0);
+    });
+
     test('keeps unrelated hidden reasoning blocks hidden while another block is being edited', async ({ page }) => {
         const result = await page.evaluate(() => {
             const chat = document.getElementById('chat');

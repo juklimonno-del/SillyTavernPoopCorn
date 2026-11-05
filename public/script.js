@@ -6321,6 +6321,13 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
             switch (chatCompletionSource) {
                 case chat_completion_sources.CLAUDE:
                     result = data?.content?.find(x => x.type === 'tool_use')?.input;
+                    if (result === undefined) {
+                        result = tryParse(text);
+                        if (result === undefined) {
+                            if (returnInvalidJson) return text;
+                            throw new Error('Claude returned invalid JSON structured output.');
+                        }
+                    }
                     break;
                 case chat_completion_sources.PERPLEXITY:
                     result = tryParse(removeReasoningFromString(text));

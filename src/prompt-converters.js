@@ -233,12 +233,15 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
     const parse = (str) => typeof str === 'string' ? JSON.parse(str) : str;
     messages.forEach((message) => {
         if (message.role === 'assistant' && message.tool_calls) {
-            message.content = message.tool_calls.map((tc) => ({
+            const content = Array.isArray(message.content)
+                ? message.content
+                : (message.content ? [{ type: 'text', text: message.content }] : []);
+            message.content = [...content, ...message.tool_calls.map((tc) => ({
                 type: 'tool_use',
                 id: tc.id,
                 name: tc.function.name,
                 input: parse(tc.function.arguments),
-            }));
+            }))];
         }
 
         if (message.role === 'tool') {
@@ -467,14 +470,10 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
         }
 
         // Convert the content to an array of parts
+        const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
         if (!Array.isArray(message.content)) {
             const content = (() => {
-                const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
                 const hasToolCallId = typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0;
-
-                if (hasToolCalls) {
-                    return { type: 'tool_calls', tool_calls: message.tool_calls };
-                }
 
                 if (hasToolCallId) {
                     return { type: 'tool_call_id', tool_call_id: message.tool_call_id, content: String(message.content ?? '') };
@@ -482,7 +481,10 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
 
                 return { type: 'text', text: String(message.content ?? '') };
             })();
-            message.content = [content];
+            message.content = hasToolCalls && content.type === 'text' && !content.text ? [] : [content];
+        }
+        if (hasToolCalls) {
+            message.content.push({ type: 'tool_calls', tool_calls: message.tool_calls });
         }
 
         // similar story as claude
@@ -598,17 +600,16 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
 
         // merge consecutive messages with the same role
         if (index > 0 && message.role === contents[contents.length - 1].role) {
+            const previousParts = contents[contents.length - 1].parts;
             parts.forEach((part) => {
-                if (part.text) {
-                    const textPart = contents[contents.length - 1].parts.find(p => typeof p.text === 'string');
-                    if (textPart) {
-                        textPart.text += '\n\n' + part.text;
-                    } else {
-                        contents[contents.length - 1].parts.push(part);
-                    }
-                }
-                if (part.inlineData || part.functionCall || part.functionResponse || part.thoughtSignature || part.mediaResolution) {
-                    contents[contents.length - 1].parts.push(part);
+                const previousPart = previousParts[previousParts.length - 1];
+                // Only join adjacent plain text. Media order and signed blocks must remain intact.
+                if (typeof part.text === 'string' && typeof previousPart?.text === 'string'
+                    && !part.thoughtSignature && !previousPart.thoughtSignature
+                    && !part.mediaResolution && !previousPart.mediaResolution) {
+                    previousPart.text += '\n\n' + part.text;
+                } else {
+                    previousParts.push(part);
                 }
             });
         } else {

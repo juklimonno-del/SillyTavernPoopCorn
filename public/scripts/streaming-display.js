@@ -67,6 +67,10 @@ export class StreamingDisplay {
     #isStopped = false;
     /** @type {ReturnType<typeof setTimeout> | null} */
     #hideTimeoutId = null;
+    /** @type {number | null} */
+    #scrollFrame = null;
+    #scrollReasoning = false;
+    #scrollContent = false;
 
     /**
      * Shows the streaming display panel.
@@ -263,7 +267,8 @@ export class StreamingDisplay {
 
         this.#reasoningSection.style.display = '';
         this.#reasoningContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, true);
-        this.#reasoningContent.scrollTop = this.#reasoningContent.scrollHeight;
+        this.#scrollReasoning = true;
+        this.#scheduleScroll();
         return this;
     }
 
@@ -279,8 +284,26 @@ export class StreamingDisplay {
         this.#hasContent = true;
         this.#textSection.style.display = '';
         this.#textContent.innerHTML = messageFormatting(text, '', false, false, -1, {}, false);
-        this.#textContent.scrollTop = this.#textContent.scrollHeight;
+        this.#scrollContent = true;
+        this.#scheduleScroll();
         return this;
+    }
+
+    /**
+     * Read both section heights before scrolling, once per frame. Content and
+     * formatting hooks still update synchronously, without forcing layout per chunk.
+     */
+    #scheduleScroll() {
+        if (this.#scrollFrame !== null) return;
+        this.#scrollFrame = requestAnimationFrame(() => {
+            this.#scrollFrame = null;
+            const reasoningHeight = this.#scrollReasoning ? this.#reasoningContent?.scrollHeight : undefined;
+            const contentHeight = this.#scrollContent ? this.#textContent?.scrollHeight : undefined;
+            if (reasoningHeight !== undefined) this.#reasoningContent.scrollTop = reasoningHeight;
+            if (contentHeight !== undefined) this.#textContent.scrollTop = contentHeight;
+            this.#scrollReasoning = false;
+            this.#scrollContent = false;
+        });
     }
 
     /** @returns {boolean} Whether any content text has been displayed via streaming */
@@ -391,6 +414,12 @@ export class StreamingDisplay {
      * @param {boolean} [options.instant=false]
      */
     #performHide({ instant = false } = {}) {
+        if (this.#scrollFrame !== null) {
+            cancelAnimationFrame(this.#scrollFrame);
+            this.#scrollFrame = null;
+        }
+        this.#scrollReasoning = false;
+        this.#scrollContent = false;
         if (!this.#element) return;
 
         const el = this.#element;
