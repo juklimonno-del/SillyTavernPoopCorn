@@ -1848,9 +1848,16 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
 
         const regexPlacement = getRegexPlacement();
-        const usableMessages = chat.map((x, index) => ({ message: x, index: index })).filter(x => !x.message.is_system);
-        const indexOf = usableMessages.findIndex(x => x.index === Number(messageId));
-        const depth = messageId >= 0 && indexOf !== -1 ? (usableMessages.length - indexOf - 1) : undefined;
+        // Depth counts later non-system messages. Streaming the newest message and
+        // formatting transient text should not traverse or allocate copies of the whole chat.
+        const index = Number(messageId);
+        let depth;
+        if (Number.isInteger(index) && index >= 0 && index < chat.length && index in chat && !chat[index].is_system) {
+            depth = 0;
+            for (let i = index + 1; i < chat.length; i++) {
+                if (i in chat && !chat[i].is_system) depth++;
+            }
+        }
 
         mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes,
             { ch_name, isSystem, isUser, messageId, isReasoning },
@@ -5299,7 +5306,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 jailbreakPromptOverride: jailbreak,
                 messages: oaiMessages,
                 messageExamples: oaiMessageExamples,
-            }, dryRun);
+            }, dryRun).catch(onError);
             generate_data = { prompt: prompt };
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
@@ -6328,6 +6335,13 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
             switch (chatCompletionSource) {
                 case chat_completion_sources.CLAUDE:
                     result = data?.content?.find(x => x.type === 'tool_use')?.input;
+                    if (result === undefined) {
+                        result = tryParse(text);
+                        if (result === undefined) {
+                            if (returnInvalidJson) return text;
+                            throw new Error('Claude returned invalid JSON structured output.');
+                        }
+                    }
                     break;
                 case chat_completion_sources.PERPLEXITY:
                     result = tryParse(removeReasoningFromString(text));

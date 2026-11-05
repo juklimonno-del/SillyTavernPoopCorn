@@ -1318,3 +1318,73 @@ describe('cachingAtDepthForOpenRouterClaude', () => {
         expect(typeof messages[1].content).toBe('string');
     });
 });
+
+describe('prompt content preservation regressions', () => {
+    const names = makeNames();
+    const call = { id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{"q":"cats"}' } };
+
+    test('keeps Gemini text after the media it originally followed', () => {
+        const result = mod.convertGooglePrompt([
+            { role: 'user', content: [{ type: 'text', text: 'Before' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1n' } }] },
+            { role: 'user', content: 'After' },
+            { role: 'user', content: 'More' },
+        ], 'gemini-2.5-flash', false, names);
+        expect(result.contents).toEqual([{ role: 'user', parts: [
+            { text: 'Before' },
+            { inlineData: { mimeType: 'image/png', data: 'aW1n' } },
+            { text: 'After\n\nMore' },
+        ] }]);
+    });
+
+    test('preserves each Gemini signed text block once without changing its text', () => {
+        const result = mod.convertGooglePrompt([
+            { role: 'assistant', content: 'First', signature: 'signature-1' },
+            { role: 'assistant', content: 'Second', signature: 'signature-2' },
+            { role: 'assistant', content: 'Unsigned' },
+            { role: 'user', content: 'Next' },
+        ], 'gemini-2.5-flash', false, names);
+        expect(result.contents[0].parts).toEqual([
+            { text: 'First', thoughtSignature: 'signature-1' },
+            { text: 'Second', thoughtSignature: 'signature-2' },
+            { text: 'Unsigned' },
+        ]);
+    });
+
+    for (const content of ['Important context', [{ type: 'text', text: 'Important context' }]]) {
+        test(`preserves Claude text alongside calls: ${JSON.stringify(content)}`, () => {
+            const result = mod.convertClaudeMessages([
+                { role: 'user', content: 'Search' },
+                { role: 'assistant', content, tool_calls: structuredClone([call]) },
+            ], '', false, true, names);
+            expect(result.messages[1].content).toEqual([
+                { type: 'text', text: 'Important context' },
+                { type: 'tool_use', id: 'call-1', name: 'lookup', input: { q: 'cats' } },
+            ]);
+        });
+    }
+
+    for (const content of ['Important context', [{ type: 'text', text: 'Important context' }]]) {
+        test(`preserves Gemini text alongside calls: ${JSON.stringify(content)}`, () => {
+            const result = mod.convertGooglePrompt([
+                { role: 'assistant', content, tool_calls: structuredClone([call]) },
+                { role: 'tool', tool_call_id: 'call-1', content: 'Found cats' },
+            ], 'gemini-2.5-flash', false, names);
+            expect(result.contents[0].parts).toEqual([
+                { text: 'Important context' },
+                { functionCall: { name: 'lookup', args: { q: 'cats' } } },
+            ]);
+            expect(result.contents[1].parts[0].functionResponse.name).toBe('lookup');
+        });
+    }
+
+    test('preserves Gemini images alongside calls', () => {
+        const result = mod.convertGooglePrompt([
+            { role: 'assistant', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,aW1n' } }], tool_calls: structuredClone([call]) },
+            { role: 'tool', tool_call_id: 'call-1', content: 'Found cats' },
+        ], 'gemini-2.5-flash', false, names);
+        expect(result.contents[0].parts).toEqual([
+            { inlineData: { mimeType: 'image/png', data: 'aW1n' } },
+            { functionCall: { name: 'lookup', args: { q: 'cats' } } },
+        ]);
+    });
+});

@@ -568,21 +568,19 @@ async function validateReverseProxy() {
  * @returns {object[]} - Array containing all messages formatted for chat completion.
  */
 function setOpenAIMessages(chat) {
-    let j = 0;
     // clean openai msgs
     const messages = [];
     // Get current API and model for thought signature validation
     const currentApi = oai_settings.chat_completion_source;
     const currentModel = getChatCompletionModel();
 
-    for (let i = chat.length - 1; i >= 0; i--) {
+    for (let j = 0; j < chat.length; j++) {
         let role = chat[j].is_user ? 'user' : 'assistant';
         let content = chat[j].mes;
 
         // If this symbol flag is set, completely ignore the message.
         // This can be used to hide messages without affecting the number of messages in the chat.
         if (chat[j].extra?.[IGNORE_SYMBOL]) {
-            j++;
             continue;
         }
 
@@ -641,11 +639,10 @@ function setOpenAIMessages(chat) {
             });
         }
 
-        messages[i] = { 'role': role, 'content': content, name: name, 'media': media, 'mediaDisplay': mediaDisplay, 'mediaIndex': mediaIndex, 'invocations': invocations, 'signature': signature, 'reasoning': reasoning };
-        j++;
+        messages.push({ 'role': role, 'content': content, name: name, 'media': media, 'mediaDisplay': mediaDisplay, 'mediaIndex': mediaIndex, 'invocations': invocations, 'signature': signature, 'reasoning': reasoning });
     }
 
-    return messages;
+    return messages.reverse();
 }
 
 /**
@@ -1538,6 +1535,7 @@ async function preparePromptsForChatCompletion({ scenario, charPersonality, name
  * @param {string[]} content.messageExamples - An array of messages to be used as dialogue examples.
  * @param dryRun - Whether this is a live call or not.
  * @returns {Promise<(any[]|boolean)[]>} An array where the first element is the prepared chat and the second element is a boolean flag.
+ * @throws {Error} If prompt preparation fails outside a dry run.
  */
 export async function prepareOpenAIMessages({
     name2,
@@ -1601,6 +1599,8 @@ export async function prepareOpenAIMessages({
             chatCompletion.log(error.stack);
             chatCompletion.log('----------------------------------------------------');
         }
+        // Keep partial prompts available for inspection, but never submit them.
+        if (!dryRun) throw error;
     } finally {
         // Pass chat completion to prompt manager for inspection
         promptManager.setChatCompletion(chatCompletion);
@@ -1646,35 +1646,23 @@ function getChatCompletionErrorMessage(data, response) {
  * @param {boolean?} [options.quiet=false] Suppress toast messages
  */
 export function tryParseStreamingError(response, decoded, { quiet = false } = {}) {
+    let data;
     try {
-        const data = JSON.parse(decoded);
-
-        if (!data) {
-            return;
-        }
-
-        checkQuotaError(data, { quiet });
-        checkModerationError(data, { quiet });
-
-        // these do not throw correctly (equiv to Error("[object Object]"))
-        // if trying to fix "[object Object]" displayed to users, start here
-
-        if (data.error) {
-            !quiet && toastr.error(getChatCompletionErrorMessage(data, response), 'Chat Completion API');
-            throw new Error(data);
-        }
-
-        if (data.message) {
-            !quiet && toastr.error(data.message, 'Chat Completion API');
-            throw new Error(data);
-        }
-
-        if (data.detail) {
-            !quiet && toastr.error(getChatCompletionErrorMessage(data, response), 'Chat Completion API');
-            throw new Error(data);
-        }
+        data = JSON.parse(decoded);
     } catch {
-        // No JSON. Do nothing.
+        // Non-JSON stream data is not an API error payload.
+        return;
+    }
+
+    if (!data) return;
+
+    checkQuotaError(data, { quiet });
+    checkModerationError(data, { quiet });
+
+    if (data.error || data.message || data.detail) {
+        const message = data.message || getChatCompletionErrorMessage(data, response);
+        !quiet && toastr.error(message, 'Chat Completion API');
+        throw new Error(message);
     }
 }
 
@@ -3174,10 +3162,16 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
                 tryParseStreamingError(response, rawData);
                 const parsed = JSON.parse(rawData);
 
-                if (canMultiSwipe && Array.isArray(parsed?.choices) && parsed?.choices?.[0]?.index > 0) {
-                    const swipeIndex = parsed.choices[0].index - 1;
-                    // FIXME: state.reasoning should be an array to support multi-swipe
-                    swipes[swipeIndex] = (swipes[swipeIndex] || '') + getStreamingReply(parsed, state, { overrideShowThoughts: false });
+                if (canMultiSwipe && Array.isArray(parsed?.choices)) {
+                    for (const choice of parsed.choices) {
+                        const choiceData = { ...parsed, choices: [choice] };
+                        if (choice.index > 0) {
+                            const swipeIndex = choice.index - 1;
+                            swipes[swipeIndex] = (swipes[swipeIndex] || '') + getStreamingReply(choiceData, state, { overrideShowThoughts: false });
+                        } else {
+                            text += getStreamingReply(choiceData, state);
+                        }
+                    }
                 } else {
                     text += getStreamingReply(parsed, state);
                 }
@@ -3234,7 +3228,7 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
             state.images.push(...inlineData.map(x => `data:${x.mimeType};base64,${x.data}`).filter(isDataURL));
         }
         if (show_thoughts) {
-            state.reasoning += (data?.candidates?.[0]?.content?.parts?.filter(x => x.thought)?.map(x => x.text)?.[0] || '');
+            state.reasoning += (data?.candidates?.[0]?.content?.parts?.filter(x => x.thought && typeof x.text === 'string')?.map(x => x.text)?.join('') || '');
         }
         // Extract thought signatures from streaming chunks (typically in final chunk)
         const parts = data?.candidates?.[0]?.content?.parts || [];
@@ -3243,7 +3237,7 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
                 state.signature = part.thoughtSignature;
             }
         });
-        return data?.candidates?.[0]?.content?.parts?.filter(x => !x.thought)?.map(x => x.text)?.[0] || '';
+        return data?.candidates?.[0]?.content?.parts?.filter(x => !x.thought && typeof x.text === 'string')?.map(x => x.text)?.join('') || '';
     } else if (chat_completion_source === chat_completion_sources.COHERE) {
         return data?.delta?.message?.content?.text || data?.delta?.message?.tool_plan || '';
     } else if (chat_completion_source === chat_completion_sources.DEEPSEEK) {

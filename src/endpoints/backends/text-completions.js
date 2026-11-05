@@ -1,4 +1,3 @@
-import { Readable } from 'node:stream';
 import fetch from 'node-fetch';
 import express from 'express';
 import _ from 'lodash';
@@ -16,60 +15,9 @@ import {
 import { forwardFetchResponse, trimV1, getConfigValue } from '../../util.js';
 import { setAdditionalHeaders } from '../../additional-headers.js';
 import { createHash } from 'node:crypto';
+import { parseOllamaStream } from '../../ollama-stream.js';
 
 export const router = express.Router();
-
-/**
- * Special boy's steaming routine. Wrap this abomination into proper SSE stream.
- * @param {import('node-fetch').Response} jsonStream JSON stream
- * @param {import('express').Request} request Express request
- * @param {import('express').Response} response Express response
- * @returns {Promise<any>} Nothing valuable
- */
-async function parseOllamaStream(jsonStream, request, response) {
-    try {
-        if (!jsonStream.body) {
-            throw new Error('No body in the response');
-        }
-
-        let partialData = '';
-        jsonStream.body.on('data', (data) => {
-            const chunk = data.toString();
-            partialData += chunk;
-            while (true) {
-                let json;
-                try {
-                    json = JSON.parse(partialData);
-                } catch (e) {
-                    break;
-                }
-                const text = json.response || '';
-                const thinking = json.thinking || '';
-                const chunk = { choices: [{ text, thinking }] };
-                response.write(`data: ${JSON.stringify(chunk)}\n\n`);
-                partialData = '';
-            }
-        });
-
-        request.socket.on('close', function () {
-            if (jsonStream.body instanceof Readable) jsonStream.body.destroy();
-            response.end();
-        });
-
-        jsonStream.body.on('end', () => {
-            console.info('Streaming request finished');
-            response.write('data: [DONE]\n\n');
-            response.end();
-        });
-    } catch (error) {
-        console.error('Error forwarding streaming response:', error);
-        if (!response.headersSent) {
-            return response.status(500).send({ error: true });
-        } else {
-            return response.end();
-        }
-    }
-}
 
 /**
  * Abort KoboldCpp generation request.
@@ -400,7 +348,7 @@ router.post('/generate', async function (request, response) {
 
         if (request.body.api_type === TEXTGEN_TYPES.OLLAMA && request.body.stream) {
             const stream = await fetch(url, args);
-            parseOllamaStream(stream, request, response);
+            await parseOllamaStream(stream, request, response);
         } else if (request.body.stream) {
             const completionsStream = await fetch(url, args);
             // Pipe remote SSE stream to Express response
