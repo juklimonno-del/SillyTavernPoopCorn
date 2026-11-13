@@ -857,6 +857,17 @@ describe('convertClaudePrompt', () => {
 describe('convertClaudeMessages', () => {
     const names = makeNames('Bot', 'User');
 
+    test('drops whitespace-only text next to tool calls (Claude rejects blank text blocks)', () => {
+        const messages = [
+            { role: 'user', content: 'Look it up' },
+            { role: 'assistant', content: '\n  ', tool_calls: [{ id: 't1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }] },
+            { role: 'tool', tool_call_id: 't1', content: 'result' },
+        ];
+        const result = mod.convertClaudeMessages(messages, '', false, true, names);
+        const assistant = result.messages.find(m => m.role === 'assistant');
+        expect(assistant.content).toEqual([{ type: 'tool_use', id: 't1', name: 'lookup', input: { q: 'x' } }]);
+    });
+
     test('extracts leading system messages when useSysPrompt is true', () => {
         const messages = [
             { role: 'system', content: 'System instruction' },

@@ -235,7 +235,7 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
         if (message.role === 'assistant' && message.tool_calls) {
             const content = Array.isArray(message.content)
                 ? message.content
-                : (message.content ? [{ type: 'text', text: message.content }] : []);
+                : (typeof message.content === 'string' && message.content.trim() ? [{ type: 'text', text: message.content }] : []);
             message.content = [...content, ...message.tool_calls.map((tc) => ({
                 type: 'tool_use',
                 id: tc.id,

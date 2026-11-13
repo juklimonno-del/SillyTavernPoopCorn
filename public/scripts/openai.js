@@ -1654,13 +1654,17 @@ export function tryParseStreamingError(response, decoded, { quiet = false } = {}
         return;
     }
 
-    if (!data) return;
+    if (!data || typeof data !== 'object') return;
 
     checkQuotaError(data, { quiet });
     checkModerationError(data, { quiet });
 
-    if (data.error || data.message || data.detail) {
-        const message = data.message || getChatCompletionErrorMessage(data, response);
+    // Only error-shaped payloads count. Normal stream events can carry a top-level
+    // `message` object (e.g. Claude's `message_start`), which is not an error.
+    const stringMessage = typeof data.message === 'string' && !Array.isArray(data.choices) ? data.message : null;
+    if (data.error || stringMessage || data.detail) {
+        const detailMessage = typeof data.detail === 'string' ? data.detail : null;
+        const message = stringMessage || detailMessage || getChatCompletionErrorMessage(data, response);
         !quiet && toastr.error(message, 'Chat Completion API');
         throw new Error(message);
     }
@@ -1682,9 +1686,7 @@ function checkQuotaError(data, { quiet = false } = {}) {
     if (data.quota_error) {
         !quiet && renderTemplateAsync('quotaError').then((html) => Popup.show.text('Quota Error', html));
 
-        // this does not throw correctly (equiv to Error("[object Object]"))
-        // if trying to fix "[object Object]" displayed to users, start here
-        throw new Error(data);
+        throw new Error(typeof data.quota_error === 'string' ? data.quota_error : 'Quota error');
     }
 }
 
