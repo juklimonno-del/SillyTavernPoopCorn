@@ -47,6 +47,10 @@ import {
     getPromptNames,
     calculateClaudeBudgetTokens,
     calculateGoogleBudgetTokens,
+    isGemini4Model,
+    isGoogleOpenAICompatUrl,
+    getGemini4OpenAICompatReasoning,
+    splitInlineThoughtTags,
     postProcessPrompt,
     PROMPT_PROCESSING_TYPE,
     addAssistantPrefix,
@@ -523,10 +527,11 @@ async function sendMakerSuiteRequest(request, response) {
             'gemini-3.1-flash-image',
         ];
 
-        const isThinkingConfigModel = m => (/^gemini-2.5-(flash|pro)/.test(m) && !/-image(-preview)?$/.test(m)) || (/^gemini-3[.\d]*-(flash|pro)/.test(m));
+        const isThinkingConfigModel = m => (/^gemini-2.5-(flash|pro)/.test(m) && !/-image(-preview)?$/.test(m)) || (/^gemini-3[.\d]*-(flash|pro)/.test(m)) || isGemini4Model(m);
         const isImageSizeModel = m => /^gemini-3/.test(m);
         // https://ai.google.dev/gemini-api/docs/latest-model#api-changes-and-parameter-updates
-        const noSamplingModel = /gemini-3\.[67]-flash|gemini-3\.5-flash-lite/.test(model);
+        // Gemini 4 ignores temperature/topP/topK/candidateCount: https://ai.google.dev/gemini-api/docs/generate-content/latest-model
+        const noSamplingModel = /gemini-3\.[67]-flash|gemini-3\.5-flash-lite/.test(model) || isGemini4Model(model);
 
         const noSearchModels = [
             'gemini-2.0-flash-lite',
@@ -610,6 +615,12 @@ async function sendMakerSuiteRequest(request, response) {
 
             if (typeof thinkingBudget === 'string' && thinkingBudget.length > 0) {
                 thinkingConfig.thinkingLevel = thinkingBudget;
+            }
+
+            // Gemini 4 thinking tokens count toward maxOutputTokens; Google recommends at least 32K.
+            // Small RP-style response lengths can be eaten by thinking and come back empty or cut off.
+            if (isGemini4Model(model) && Number(generationConfig.maxOutputTokens) < 32768) {
+                console.warn(color.yellow(`${model}: thinking shares the response length (${generationConfig.maxOutputTokens} tokens). Google recommends at least 32768 to avoid empty or truncated replies.`));
             }
 
             // Vertex doesn't allow mixing disabled thinking with includeThoughts
@@ -2606,6 +2617,22 @@ router.post('/generate', async function (request, response) {
             }
         }
 
+        // Gemini 4 over an OpenAI-compatible endpoint (Google's own or a proxy).
+        // Skipped if the user already set reasoning_effort or extra_body in Additional Parameters.
+        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM
+            && !Object.hasOwn(bodyParams, 'reasoning_effort')
+            && !Object.hasOwn(bodyParams, 'extra_body')) {
+            const geminiReasoning = getGemini4OpenAICompatReasoning({
+                model: request.body.model,
+                url: request.body.custom_url,
+                reasoningEffort: String(request.body.reasoning_effort),
+                includeReasoning: Boolean(request.body.include_reasoning),
+            });
+            if (geminiReasoning) {
+                Object.assign(bodyParams, geminiReasoning);
+            }
+        }
+
         if (request.body.verbosity && [CHAT_COMPLETION_SOURCES.CUSTOM, CHAT_COMPLETION_SOURCES.OPENAI].includes(request.body.chat_completion_source)) {
             if (OPENAI_VERBOSITY_MODELS.test(request.body.model)) {
                 bodyParams['verbosity'] = request.body.verbosity;
@@ -2697,6 +2724,9 @@ router.post('/generate', async function (request, response) {
             /** @type {any} */
             const json = await fetchResponse.json();
             console.debug('Chat Completion response:', json);
+            if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM && isGoogleOpenAICompatUrl(request.body.custom_url)) {
+                splitInlineThoughtTags(json);
+            }
             return response.send(json);
         } else {
             const responseText = await fetchResponse.text();

@@ -575,16 +575,17 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
         });
 
         // https://ai.google.dev/gemini-api/docs/gemini-3#migrating_from_other_models
-        // Inject stored thought signatures, or fall back to bypass magic for Gemini 3
-        if (/gemini-3/.test(model) || /gemini-2\.5/.test(model)) {
+        // Inject stored thought signatures, or fall back to bypass magic for Gemini 3+
+        const isGemini3Plus = /gemini-3/.test(model) || isGemini4Model(model);
+        if (isGemini3Plus || /gemini-2\.5/.test(model)) {
             const skipSignatureMagic = 'skip_thought_signature_validator';
             const textSignature = message.signature;
 
             parts.forEach((part) => {
                 if (enableThoughtSignatures && textSignature && typeof part.text === 'string') {
                     part.thoughtSignature = textSignature;
-                } else if (/gemini-3/.test(model)) {
-                    // Gemini 3: Fall back to bypass magic for function calls (mandatory) and images
+                } else if (isGemini3Plus) {
+                    // Gemini 3+: Fall back to bypass magic for function calls (mandatory) and images
                     if (part.functionCall && !part.thoughtSignature) {
                         part.thoughtSignature = skipSignatureMagic;
                     }
@@ -1174,6 +1175,82 @@ export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream, 
 }
 
 /**
+ * Checks if the model is a Gemini 4 family model (Argon, Carbon, Hydrogen, Neon and later elements).
+ * @param {string} model Model name
+ * @returns {boolean} True if Gemini 4
+ */
+export function isGemini4Model(model) {
+    return /gemini-4(?:[.-]|$)/.test(String(model));
+}
+
+/**
+ * Checks if a URL points to Google's own OpenAI-compatible endpoint (AI Studio or Vertex AI).
+ * @param {string} url Endpoint URL
+ * @returns {boolean} True if Google's OpenAI compatibility layer
+ */
+export function isGoogleOpenAICompatUrl(url) {
+    try {
+        const hostname = new URL(String(url)).hostname;
+        return hostname === 'generativelanguage.googleapis.com' || hostname.endsWith('aiplatform.googleapis.com');
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Builds reasoning parameters for Gemini 4 models served through an OpenAI-compatible endpoint.
+ * Google's own endpoint only returns thoughts via extra_body.google.thinking_config, which can't be combined
+ * with reasoning_effort. Third-party proxies take reasoning_effort and return reasoning_content.
+ * @param {object} params
+ * @param {string} params.model Model name, optionally provider-prefixed (e.g. google/gemini-4-neon)
+ * @param {string} params.url Endpoint URL
+ * @param {string} params.reasoningEffort SillyTavern reasoning effort
+ * @param {boolean} params.includeReasoning Whether thoughts were requested
+ * @returns {object|null} Body params to merge, or null if not a Gemini 4 model
+ */
+export function getGemini4OpenAICompatReasoning({ model, url, reasoningEffort, includeReasoning }) {
+    const baseModel = String(model).split('/').pop();
+    if (!isGemini4Model(baseModel)) {
+        return null;
+    }
+
+    const level = calculateGoogleBudgetTokens(0, reasoningEffort, baseModel);
+
+    if (isGoogleOpenAICompatUrl(url)) {
+        /** @type {{include_thoughts: boolean, thinking_level?: string}} */
+        const thinkingConfig = { include_thoughts: Boolean(includeReasoning) };
+        if (typeof level === 'string') {
+            thinkingConfig.thinking_level = level;
+        }
+        // Google's compat layer reads a literal top-level "extra_body" key.
+        return { extra_body: { google: { thinking_config: thinkingConfig } } };
+    }
+
+    return typeof level === 'string' ? { reasoning_effort: level } : {};
+}
+
+/**
+ * Moves a leading <thought>...</thought> block (Google's OpenAI-compatible thought summaries)
+ * out of the message content and into reasoning_content. Mutates the response.
+ * @param {any} json Chat completion response
+ * @returns {any} The same response
+ */
+export function splitInlineThoughtTags(json) {
+    for (const choice of Array.isArray(json?.choices) ? json.choices : []) {
+        const message = choice?.message;
+        if (!message || typeof message.content !== 'string' || message.reasoning_content) {
+            continue;
+        }
+        const match = message.content.match(/^\s*<thought>([\s\S]*?)<\/thought>\s*/);
+        if (match) {
+            message.reasoning_content = match[1].trim();
+            message.content = message.content.slice(match[0].length);
+        }
+    }
+    return json;
+}
+
+/**
  * Calculate the Google budget tokens for a given reasoning effort.
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort
@@ -1301,6 +1378,34 @@ export function calculateGoogleBudgetTokens(maxTokens, reasoningEffort, model) {
         }
 
         return null;
+    }
+
+    function getGemini4Budget() {
+        // Gemini 4 (Argon, Carbon, Hydrogen, Neon) only accepts thinkingLevel.
+        // thinkingBudget is deprecated and 'minimal' is rejected; thinking can't be disabled.
+        // Argon/Carbon: low, medium, high. Hydrogen/Neon add xhigh.
+        // https://ai.google.dev/gemini-api/docs/generate-content/latest-model
+        const supportsXHigh = /gemini-4-(hydrogen|neon)/.test(model);
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return null;
+            case REASONING_EFFORT.min:
+                return 'low';
+            case REASONING_EFFORT.low:
+                return 'low';
+            case REASONING_EFFORT.medium:
+                return 'medium';
+            case REASONING_EFFORT.high:
+                return 'high';
+            case REASONING_EFFORT.max:
+                return supportsXHigh ? 'xhigh' : 'high';
+        }
+
+        return null;
+    }
+
+    if (isGemini4Model(model)) {
+        return getGemini4Budget();
     }
 
     if (/gemini-3[.\d]*-pro/.test(model)) {

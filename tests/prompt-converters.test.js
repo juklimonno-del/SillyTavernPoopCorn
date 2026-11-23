@@ -209,6 +209,75 @@ describe('calculateGoogleBudgetTokens', () => {
         test('max returns high', () => expect(mod.calculateGoogleBudgetTokens(8192, 'max', 'gemini-3.0-pro')).toBe('high'));
     });
 
+    describe('gemini-4', () => {
+        test('argon/carbon map to low/medium/high', () => {
+            for (const model of ['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-argon-cyber-permissive']) {
+                expect(mod.calculateGoogleBudgetTokens(8192, 'auto', model)).toBeNull();
+                expect(mod.calculateGoogleBudgetTokens(8192, 'min', model)).toBe('low');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'low', model)).toBe('low');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'medium', model)).toBe('medium');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'high', model)).toBe('high');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'max', model)).toBe('high');
+            }
+        });
+
+        test('hydrogen/neon map max to xhigh', () => {
+            for (const model of ['gemini-4-hydrogen', 'gemini-4-neon']) {
+                expect(mod.calculateGoogleBudgetTokens(8192, 'auto', model)).toBeNull();
+                expect(mod.calculateGoogleBudgetTokens(8192, 'min', model)).toBe('low');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'medium', model)).toBe('medium');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'high', model)).toBe('high');
+                expect(mod.calculateGoogleBudgetTokens(8192, 'max', model)).toBe('xhigh');
+            }
+        });
+
+        test('never returns a numeric budget or minimal', () => {
+            for (const effort of ['auto', 'min', 'low', 'medium', 'high', 'max']) {
+                const value = mod.calculateGoogleBudgetTokens(8192, effort, 'gemini-4-neon');
+                expect(typeof value === 'number').toBe(false);
+                expect(value).not.toBe('minimal');
+            }
+        });
+
+        test('OpenAI-compatible: Google endpoint uses extra_body thinking_config', () => {
+            const url = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'gemini-4-neon', url, reasoningEffort: 'max', includeReasoning: true }))
+                .toEqual({ extra_body: { google: { thinking_config: { include_thoughts: true, thinking_level: 'xhigh' } } } });
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'gemini-4-argon', url, reasoningEffort: 'auto', includeReasoning: false }))
+                .toEqual({ extra_body: { google: { thinking_config: { include_thoughts: false } } } });
+            const vertex = 'https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi';
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'google/gemini-4-carbon', url: vertex, reasoningEffort: 'min', includeReasoning: true }))
+                .toEqual({ extra_body: { google: { thinking_config: { include_thoughts: true, thinking_level: 'low' } } } });
+        });
+
+        test('OpenAI-compatible: proxies get reasoning_effort', () => {
+            const url = 'https://api.example-proxy.ai/v1';
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'google/gemini-4-hydrogen', url, reasoningEffort: 'max', includeReasoning: true }))
+                .toEqual({ reasoning_effort: 'xhigh' });
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'gemini-4-carbon', url, reasoningEffort: 'max', includeReasoning: true }))
+                .toEqual({ reasoning_effort: 'high' });
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'gemini-4-carbon', url, reasoningEffort: 'auto', includeReasoning: true })).toEqual({});
+            expect(mod.getGemini4OpenAICompatReasoning({ model: 'gpt-5', url, reasoningEffort: 'high', includeReasoning: true })).toBeNull();
+        });
+
+        test('splitInlineThoughtTags moves leading thoughts to reasoning_content', () => {
+            const json = { choices: [{ message: { content: '<thought>planning the scene</thought>\nThe door creaks.' } }] };
+            mod.splitInlineThoughtTags(json);
+            expect(json.choices[0].message).toEqual({ content: 'The door creaks.', reasoning_content: 'planning the scene' });
+
+            const untouched = { choices: [{ message: { content: 'She said <thought>hmm</thought>.' } }] };
+            mod.splitInlineThoughtTags(untouched);
+            expect(untouched.choices[0].message.content).toBe('She said <thought>hmm</thought>.');
+        });
+
+        test('isGemini4Model matches only Gemini 4', () => {
+            expect(mod.isGemini4Model('gemini-4-argon')).toBe(true);
+            expect(mod.isGemini4Model('gemini-4-neon')).toBe(true);
+            expect(mod.isGemini4Model('gemini-3.7-flash')).toBe(false);
+            expect(mod.isGemini4Model('gemma-4-26b-a4b-it')).toBe(false);
+        });
+    });
+
     describe('flash (non-gemini-3)', () => {
         test('auto returns -1', () => {
             expect(mod.calculateGoogleBudgetTokens(8192, 'auto', 'gemini-2.0-flash')).toBe(-1);

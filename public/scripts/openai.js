@@ -3207,6 +3207,55 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
 }
 
 /**
+ * Routes a leading <thought>...</thought> block in streamed content to reasoning.
+ * Google's OpenAI-compatible endpoint streams Gemini thought summaries inline this way
+ * instead of using reasoning_content. Only a block at the very start of the reply is treated as thoughts.
+ * @param {string} text Content from the current chunk
+ * @param {object} state Streaming state
+ * @param {boolean} showThoughts Whether to keep the thoughts as reasoning
+ * @returns {string} Content with thought text removed
+ */
+export function splitStreamingThoughtTags(text, state, showThoughts) {
+    const closeTag = '</thought>';
+
+    if (typeof text !== 'string' || !text) {
+        return text;
+    }
+
+    if (!state.inlineThought) {
+        if (state.inlineThoughtChecked) {
+            return text;
+        }
+        // Wait for the first non-whitespace content before deciding
+        if (!text.trim()) {
+            return text;
+        }
+        state.inlineThoughtChecked = true;
+        const match = text.match(/^\s*<thought>/);
+        if (!match) {
+            return text;
+        }
+        state.inlineThought = true;
+        text = text.slice(match[0].length);
+    }
+
+    const closeIndex = text.indexOf(closeTag);
+    if (closeIndex === -1) {
+        if (showThoughts) {
+            state.reasoning += text;
+        }
+        return '';
+    }
+
+    if (showThoughts) {
+        state.reasoning += text.slice(0, closeIndex);
+    }
+    state.inlineThought = false;
+    // The answer often starts in the same chunk as the closing tag
+    return text.slice(closeIndex + closeTag.length).replace(/^\s+/, '');
+}
+
+/**
  * Extracts the reply from the response data from a chat completions-like source
  * @param {object} data Response data from the chat completions-like source
  * @param {object} state Additional state to keep track of
@@ -3289,7 +3338,10 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
                 data.choices?.filter(x => x?.delta?.reasoning)?.[0]?.delta?.reasoning ??
                 '';
         }
-        return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
+        const content = data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
+        return chat_completion_source === chat_completion_sources.CUSTOM
+            ? splitStreamingThoughtTags(content, state, show_thoughts)
+            : content;
     } else if (chat_completion_source === chat_completion_sources.MISTRALAI) {
         if (show_thoughts) {
             state.reasoning += (data.choices?.filter(x => x?.delta?.content?.[0]?.thinking)?.[0]?.delta?.content?.[0]?.thinking?.[0]?.text || '');
@@ -5140,6 +5192,7 @@ function getGeminiMaxContext(model, isUnlocked) {
         [/gemini-2\.5-flash-image/, max_32k],
         [/gemini-3\.1-flash-image/, max_128k],
         [/gemini-3-pro-image/, max_64k],
+        [/gemini-4(?:[.-]|$)/, max_1mil],
         [/gemini-(?:3[.\d]*|2\.(?:5|0))-(pro|flash)/, max_1mil],
         [/(gemini-exp|learnlm-2\.0-flash|gemini-robotics)/, max_1mil],
         [/gemma-3-27b-it/, max_128k],
@@ -6257,6 +6310,7 @@ export function isImageInliningSupported() {
         'gemini-2.0',
         'gemini-2.5',
         'gemini-3',
+        'gemini-4',
         'gemini-exp-1206',
         'learnlm',
         'gemini-robotics',
@@ -6374,6 +6428,7 @@ export function isVideoInliningSupported() {
         'gemini-2.5',
         'gemini-exp-1206',
         'gemini-3',
+        'gemini-4',
         'gemma-4',
         // Z.AI (GLM)
         'glm-4.5v',
@@ -6412,6 +6467,7 @@ export function isAudioInliningSupported() {
         'gemini-2.0',
         'gemini-2.5',
         'gemini-3',
+        'gemini-4',
         'gemini-exp-1206',
         'gpt-4o-audio',
         'gpt-4o-realtime',
